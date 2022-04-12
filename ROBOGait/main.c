@@ -55,30 +55,39 @@ UART_HandleTypeDef huart1;
 
 /* USER CODE BEGIN PV */
 
-int tx_aux, rx_aux; //Enteros auxiliares para UART
-uint8_t tx_buf[16], rx_buf[8]; //Buffers para transmision UART
+unsigned char *tx_ptr, *rx_ptr; //Punteros auxiliares para UART
+unsigned char tx_buf[20], rx_buf[12]; //Buffers para transmision UART
 										//Mensaje de salida:
-											//Bytes 0-3: v_cur
-											//Bytes 4-7: w_cur
+											//Bytes 0-3: rx_cur
+											//Bytes 4-7: ry_cur
+											//Bytes 8-11: v_cur
+											//Bytes 12-15: w_cur
+											//Bytes 16-19: cam_cur
 										//Mensaje de entrada:
 											//Bytes 0-3: v_in
 											//Bytes 4-7: w_in
-
-//Variables fisicas solicitadoas
-float v_in, w_in; //Valores solicitados de v y w (m/s)
-						//v_in -> w_motor -> d -> counter
-
+											//Bytes 8-11: cam_in
 
 //Variables fisicas actuales
+float px_cur, py_cur; //Valores actuales de x,y (m)
+						//odometria -> x,y
 float v_cur, w_cur; //Valores actuales de v y w (m/s)
 						//cuenta temp -> giro motor -> v_cur
+float cam_cur; //Orientacion actual de la camara (º respecto al centro)
+						//realimentacion -> ADC -> º
+
+//Variables fisicas solicitadas
+float v_in, w_in; //Valores solicitados de v y w (m/s)
+						//v_in -> w_motor -> d -> counter
+float cam_in; //Orientacion solicitada de la camara
+						//cam_in - cam_cur -> control -> d -> counter
 
 //Variables para medicion IC
 double receiver; //Tiempo activo de señal radio (1ms - 2ms)
 double rx_count; //Contador auxiliar para temporizador
 					//rx_count -> A/B -> pin modo (D15)
 
-//Mediciones MPU9250----------------------------------------------------------------------------------------------TO DO
+//Mediciones MPU9250---------------------------------------------------------------------------------------------------------------------------------TO DO
 
 
 /* USER CODE END PV */
@@ -115,12 +124,13 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 {
 	if(huart == &huart1)
 	{
-		//v_cur
-		rx_aux = rx_buf[0] << 24 | rx_buf[1] << 16 | rx_buf[2] << 8 | rx_buf[3];
-		v_in = (float)rx_aux / INDEX;
-		//w_cur
-		rx_aux = rx_buf[4] << 24 | rx_buf[5] << 16 | rx_buf[6] << 8 | rx_buf[7];
-		w_in = (float)rx_aux / INDEX;
+		//Mensaje entrante
+			rx_ptr = (unsigned char*) &v_in;
+			for (int i = 0; i < 4; i++) *(rx_ptr + i) = rx_buf[i];
+			rx_ptr = (unsigned char*) &w_in;
+			for (int i = 4; i < 8; i++) *(rx_ptr + i) = rx_buf[i];
+			rx_ptr = (unsigned char*) &cam_in;
+			for (int i = 8; i < 12; i++) *(rx_ptr + i) = rx_buf[i];
 	}
 }
 
@@ -188,7 +198,7 @@ int main(void)
 	  //Accion control sobre camara---------------------------------------------------------------------------------TO DO
 
 
-
+	  //Odomteria---------------------------------------------------------------------------------------------------TO DO
 
 
 
@@ -197,11 +207,16 @@ int main(void)
 	  	  if (receiver > 1.7) HAL_GPIO_WritePin(GPIOD, GPIO_PIN_15, 0); //Boton B - Modo manual
 
 	  //Formacion mensaje saliente
-		  rx_aux = v_cur * INDEX;
-		  for (int i = 0 ; i < 4; i++) tx_buf[i] = rx_aux >> 8 * (3-i);
-		  rx_aux = w_cur * INDEX;
-		  for (int i = 0 ; i < 4; i++) tx_buf[i+4] = rx_aux >> 8 * (3-i);
-		  rx_aux = v_cur * INDEX;
+		    tx_ptr = (unsigned char*) &px_cur;
+		    for (int i = 0; i < 4; i++) tx_buf[i] = *(tx_ptr + i);
+		    tx_ptr = (unsigned char*) &py_cur;
+		    for (int i = 4; i < 8; i++) tx_buf[i] = *(tx_ptr + i);
+		    tx_ptr = (unsigned char*) &v_cur;
+		    for (int i = 8; i < 12; i++) tx_buf[i] = *(tx_ptr + i);
+		    tx_ptr = (unsigned char*) &w_cur;
+		    for (int i = 12; i < 16; i++) tx_buf[i] = *(tx_ptr + i);
+		    tx_ptr = (unsigned char*) &cam_cur;
+		    for (int i = 16; i < 20; i++) tx_buf[i] = *(tx_ptr + i);
 	  //Envio mensaje saliente
 		  HAL_UART_Transmit_IT(&huart1, tx_buf, sizeof(tx_buf));
 

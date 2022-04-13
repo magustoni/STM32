@@ -32,13 +32,16 @@
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
 
+//Constantes fisicas
 #define PI 3.14159265359
-
 #define FRECUENCIA 16000000 //Frecuencia reloj interno (Hz)
-#define INDEX 1000000 //Multiplicador/divisor para la transmision UART
-
 #define REDUCCION 30 //Reducion en la transmision
 #define DIAMETRO 0.203 //Diametro ruedas (m)
+
+//Pines E/S
+#define PIN_MODO GPIOD, GPIO_PIN_12 //Pin seleccion modo
+										//1 -> automatico | 0 -> manual
+
 
 /* USER CODE END PD */
 
@@ -50,11 +53,38 @@
 /* Private variables ---------------------------------------------------------*/
 TIM_HandleTypeDef htim1;
 TIM_HandleTypeDef htim2;
+TIM_HandleTypeDef htim5;
 
 UART_HandleTypeDef huart1;
 
 /* USER CODE BEGIN PV */
 
+//Variables fisicas actuales
+float px_cur, py_cur; //Valores actuales de x,y (m)
+						//odometria -> x,y
+float v_cur, w_cur; //Valores actuales de v y w (m/s)
+						//cuenta temp -> giro motor -> v_cur
+float dir_cur; //Orientacion actual de la direcicon (º respecto al centro)
+						//realimentacion -> ADC -> º
+float cam_cur; //Orientacion actual de la camara (º respecto al centro)
+						//realimentacion -> ADC -> º
+
+//Variables fisicas solicitadas
+float v_in, w_in; //Valores solicitados de v y w (m/s)
+						//v_in -> w_motor -> d -> set_compare
+float cam_in; //Orientacion solicitada de la camara
+						//cam_in - cam_cur -> control -> d -> set_compare
+
+//Variables para medir encoder
+float v_count; //Contador auxiliar para temporizador
+float frequency; //Frecuencia pulsos = vueltas/seg
+
+//Variables para entrada receptor
+float rx_count; //Contador auxiliar para temporizador
+float duty; //Ciclo trabajo radio (5% - 10%)
+					//rx_count -> duty -> A/B -> pin modo
+
+//Buffers y punteros comunicacion
 unsigned char *tx_ptr, *rx_ptr; //Punteros auxiliares para UART
 unsigned char tx_buf[20], rx_buf[12]; //Buffers para transmision UART
 										//Mensaje de salida:
@@ -68,27 +98,6 @@ unsigned char tx_buf[20], rx_buf[12]; //Buffers para transmision UART
 											//Bytes 4-7: w_in
 											//Bytes 8-11: cam_in
 
-//Variables fisicas actuales
-float px_cur, py_cur; //Valores actuales de x,y (m)
-						//odometria -> x,y
-float v_cur, w_cur; //Valores actuales de v y w (m/s)
-						//cuenta temp -> giro motor -> v_cur
-float cam_cur; //Orientacion actual de la camara (º respecto al centro)
-						//realimentacion -> ADC -> º
-
-//Variables fisicas solicitadas
-float v_in, w_in; //Valores solicitados de v y w (m/s)
-						//v_in -> w_motor -> d -> counter
-float cam_in; //Orientacion solicitada de la camara
-						//cam_in - cam_cur -> control -> d -> counter
-
-//Variables para medicion IC
-double receiver; //Tiempo activo de señal radio (1ms - 2ms)
-double rx_count; //Contador auxiliar para temporizador
-					//rx_count -> A/B -> pin modo (D15)
-
-//Mediciones MPU9250---------------------------------------------------------------------------------------------------------------------------------TO DO
-
 
 /* USER CODE END PV */
 
@@ -98,39 +107,64 @@ static void MX_GPIO_Init(void);
 static void MX_TIM1_Init(void);
 static void MX_TIM2_Init(void);
 static void MX_USART1_UART_Init(void);
+static void MX_TIM5_Init(void);
 /* USER CODE BEGIN PFP */
 
 void HAL_TIM_IC_CaptureCallback(TIM_HandleTypeDef *htim)
 {
-	if(htim == &htim1) //Lectura receptor
+	//Velocidad encoder
+	if (htim->Instance == TIM2)
 	{
-		if(rx_count == 0){ //Flanco subida
-			rx_count = __HAL_TIM_GET_COUNTER(&htim1);
-		}
-		else{ //Flanco bajada
-			receiver = (__HAL_TIM_GET_COUNTER(&htim1) - rx_count) / 1000;
-			__HAL_TIM_SET_COUNTER(&htim1, 0);
-			rx_count = 0;
-		}
-	}
-	if(htim == &htim2) //Medicion velocidad encoder
-	{
-		v_cur = (FRECUENCIA / __HAL_TIM_GET_COUNTER(&htim2)) * PI * DIAMETRO / REDUCCION;
-		__HAL_TIM_SET_COUNTER(&htim2, 0);
+		v_count = HAL_TIM_ReadCapturedValue(htim, TIM_CHANNEL_1);
+
+		if(v_count != 0)
+			frequency = FRECUENCIA / v_count;
+		__HAL_TIM_SET_COUNTER(htim, 0);
 	}
 
+
+	//PWM receptor
+	if (htim->Instance == TIM5 && htim->Channel == 1)
+	{
+		rx_count = HAL_TIM_ReadCapturedValue(htim, TIM_CHANNEL_1);
+
+		if (rx_count != 0)
+			duty = HAL_TIM_ReadCapturedValue(htim, TIM_CHANNEL_2) * 100 / rx_count;
+	}
 }
 void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 {
 	if(huart == &huart1)
 	{
-		//Mensaje entrante
-			rx_ptr = (unsigned char*) &v_in;
-			for (int i = 0; i < 4; i++) *(rx_ptr + i) = rx_buf[i];
-			rx_ptr = (unsigned char*) &w_in;
-			for (int i = 4; i < 8; i++) *(rx_ptr + i) = rx_buf[i];
-			rx_ptr = (unsigned char*) &cam_in;
-			for (int i = 8; i < 12; i++) *(rx_ptr + i) = rx_buf[i];
+		//Comprension mensaje entrante
+		rx_ptr = (unsigned char*) &v_in; //Velocidad x (requerida)
+		for (int i = 0; i < 4; i++) *(rx_ptr + i) = rx_buf[i];
+		rx_ptr = (unsigned char*) &w_in; //Rotacion z (requerida)
+		for (int i = 4; i < 8; i++) *(rx_ptr + i) = rx_buf[i];
+		rx_ptr = (unsigned char*) &cam_in; //Angulo camara (requerido)
+		for (int i = 8; i < 12; i++) *(rx_ptr + i) = rx_buf[i];
+		//Nueva recepcion mensaje
+		HAL_UART_Receive_IT(&huart1, rx_buf, sizeof(rx_buf));
+	}
+}
+
+void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart)
+{
+	if(huart == &huart1)
+	{
+		//Formacion mensaje saliente
+		tx_ptr = (unsigned char*) &px_cur; //Posicion x (actual)
+		for (int i = 0; i < 4; i++) tx_buf[i] = *(tx_ptr + i);
+		tx_ptr = (unsigned char*) &py_cur; //Posicion y (actual)
+		for (int i = 4; i < 8; i++) tx_buf[i] = *(tx_ptr + i);
+		tx_ptr = (unsigned char*) &v_cur; //Velocidad x (actual)
+		for (int i = 8; i < 12; i++) tx_buf[i] = *(tx_ptr + i);
+		tx_ptr = (unsigned char*) &w_cur; //Rotacion z (actual)
+		for (int i = 12; i < 16; i++) tx_buf[i] = *(tx_ptr + i);
+		tx_ptr = (unsigned char*) &cam_cur; //Angulo camara (actual)
+		for (int i = 16; i < 20; i++) tx_buf[i] = *(tx_ptr + i);
+		//Nuevo envio mensaje
+		HAL_UART_Transmit_IT(&huart1, tx_buf, sizeof(tx_buf));
 	}
 }
 
@@ -172,13 +206,34 @@ int main(void)
   MX_TIM1_Init();
   MX_TIM2_Init();
   MX_USART1_UART_Init();
+  MX_TIM5_Init();
   /* USER CODE BEGIN 2 */
 
+  //Inicio salidas PWM
   HAL_TIM_PWM_Start_IT(&htim1, TIM_CHANNEL_1);
   HAL_TIM_PWM_Start_IT(&htim1, TIM_CHANNEL_2);
   HAL_TIM_PWM_Start_IT(&htim1, TIM_CHANNEL_3);
-  HAL_TIM_IC_Start_IT(&htim1, TIM_CHANNEL_4);
-  HAL_TIM_IC_Start_IT(&htim2, TIM_CHANNEL_1);
+  //Inicio mediciones PWM Input
+  HAL_TIM_IC_Start_IT(&htim2, TIM_CHANNEL_1); //Canal directo
+  HAL_TIM_IC_Start(&htim2, TIM_CHANNEL_2); //Canal indirecto
+  HAL_TIM_IC_Start_IT(&htim5, TIM_CHANNEL_1); //Canal directo
+  HAL_TIM_IC_Start(&htim5, TIM_CHANNEL_2); //Canal indirecto
+
+  //Primera recepcion UART
+  HAL_UART_Receive_IT(&huart1, rx_buf, sizeof(rx_buf));
+
+  //Primera transmision UART
+  tx_ptr = (unsigned char*) &px_cur; //Posicion x (actual)
+  for (int i = 0; i < 4; i++) tx_buf[i] = *(tx_ptr + i);
+  tx_ptr = (unsigned char*) &py_cur; //Posicion y (actual)
+  for (int i = 4; i < 8; i++) tx_buf[i] = *(tx_ptr + i);
+  tx_ptr = (unsigned char*) &v_cur; //Velocidad x (actual)
+  for (int i = 8; i < 12; i++) tx_buf[i] = *(tx_ptr + i);
+  tx_ptr = (unsigned char*) &w_cur; //Rotacion z (actual)
+  for (int i = 12; i < 16; i++) tx_buf[i] = *(tx_ptr + i);
+  tx_ptr = (unsigned char*) &cam_cur; //Angulo camara (actual)
+  for (int i = 16; i < 20; i++) tx_buf[i] = *(tx_ptr + i);
+  HAL_UART_Transmit_IT(&huart1, tx_buf, sizeof(tx_buf));
 
   /* USER CODE END 2 */
 
@@ -190,35 +245,17 @@ int main(void)
 
     /* USER CODE BEGIN 3 */
 
-	  //Recepcion mensaje entrante
-	  	  HAL_UART_Receive_IT(&huart1, rx_buf, sizeof(rx_buf));
+	  //Seleccion modo
+	  	  if (duty < 8) HAL_GPIO_WritePin(PIN_MODO, 1); //Boton A - Modo automatico
+	  	  if (duty > 8) HAL_GPIO_WritePin(PIN_MODO, 0); //Boton B - Modo manual
 
+	  //Medicion angulo direccion-----------------------------------------------------------------------------------TO DO
+	  //Medicion angulo camara--------------------------------------------------------------------------------------TO DO
 	  //Accion control sobre ESC------------------------------------------------------------------------------------TO DO
 	  //Accion control sobre servo----------------------------------------------------------------------------------TO DO
 	  //Accion control sobre camara---------------------------------------------------------------------------------TO DO
-
-
-	  //Odomteria---------------------------------------------------------------------------------------------------TO DO
-
-
-
-	  //Seleccion modo
-	  	  if (receiver < 1.25) HAL_GPIO_WritePin(GPIOD, GPIO_PIN_15, 1); //Boton A - Modo automatico
-	  	  if (receiver > 1.7) HAL_GPIO_WritePin(GPIOD, GPIO_PIN_15, 0); //Boton B - Modo manual
-
-	  //Formacion mensaje saliente
-		    tx_ptr = (unsigned char*) &px_cur;
-		    for (int i = 0; i < 4; i++) tx_buf[i] = *(tx_ptr + i);
-		    tx_ptr = (unsigned char*) &py_cur;
-		    for (int i = 4; i < 8; i++) tx_buf[i] = *(tx_ptr + i);
-		    tx_ptr = (unsigned char*) &v_cur;
-		    for (int i = 8; i < 12; i++) tx_buf[i] = *(tx_ptr + i);
-		    tx_ptr = (unsigned char*) &w_cur;
-		    for (int i = 12; i < 16; i++) tx_buf[i] = *(tx_ptr + i);
-		    tx_ptr = (unsigned char*) &cam_cur;
-		    for (int i = 16; i < 20; i++) tx_buf[i] = *(tx_ptr + i);
-	  //Envio mensaje saliente
-		  HAL_UART_Transmit_IT(&huart1, tx_buf, sizeof(tx_buf));
+	  //Comunicacion MPU9250----------------------------------------------------------------------------------------TO DO
+	  //Odometria---------------------------------------------------------------------------------------------------TO DO
 
   }
   /* USER CODE END 3 */
@@ -278,7 +315,6 @@ static void MX_TIM1_Init(void)
   TIM_ClockConfigTypeDef sClockSourceConfig = {0};
   TIM_MasterConfigTypeDef sMasterConfig = {0};
   TIM_OC_InitTypeDef sConfigOC = {0};
-  TIM_IC_InitTypeDef sConfigIC = {0};
   TIM_BreakDeadTimeConfigTypeDef sBreakDeadTimeConfig = {0};
 
   /* USER CODE BEGIN TIM1_Init 1 */
@@ -304,10 +340,6 @@ static void MX_TIM1_Init(void)
   {
     Error_Handler();
   }
-  if (HAL_TIM_IC_Init(&htim1) != HAL_OK)
-  {
-    Error_Handler();
-  }
   sMasterConfig.MasterOutputTrigger = TIM_TRGO_RESET;
   sMasterConfig.MasterSlaveMode = TIM_MASTERSLAVEMODE_DISABLE;
   if (HAL_TIMEx_MasterConfigSynchronization(&htim1, &sMasterConfig) != HAL_OK)
@@ -315,7 +347,7 @@ static void MX_TIM1_Init(void)
     Error_Handler();
   }
   sConfigOC.OCMode = TIM_OCMODE_PWM1;
-  sConfigOC.Pulse = 0;
+  sConfigOC.Pulse = 1000;
   sConfigOC.OCPolarity = TIM_OCPOLARITY_HIGH;
   sConfigOC.OCNPolarity = TIM_OCNPOLARITY_HIGH;
   sConfigOC.OCFastMode = TIM_OCFAST_DISABLE;
@@ -325,19 +357,13 @@ static void MX_TIM1_Init(void)
   {
     Error_Handler();
   }
+  sConfigOC.Pulse = 1500;
   if (HAL_TIM_PWM_ConfigChannel(&htim1, &sConfigOC, TIM_CHANNEL_2) != HAL_OK)
   {
     Error_Handler();
   }
+  sConfigOC.Pulse = 2000;
   if (HAL_TIM_PWM_ConfigChannel(&htim1, &sConfigOC, TIM_CHANNEL_3) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  sConfigIC.ICPolarity = TIM_INPUTCHANNELPOLARITY_BOTHEDGE;
-  sConfigIC.ICSelection = TIM_ICSELECTION_DIRECTTI;
-  sConfigIC.ICPrescaler = TIM_ICPSC_DIV1;
-  sConfigIC.ICFilter = 0;
-  if (HAL_TIM_IC_ConfigChannel(&htim1, &sConfigIC, TIM_CHANNEL_4) != HAL_OK)
   {
     Error_Handler();
   }
@@ -418,6 +444,80 @@ static void MX_TIM2_Init(void)
 }
 
 /**
+  * @brief TIM5 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_TIM5_Init(void)
+{
+
+  /* USER CODE BEGIN TIM5_Init 0 */
+
+  /* USER CODE END TIM5_Init 0 */
+
+  TIM_ClockConfigTypeDef sClockSourceConfig = {0};
+  TIM_SlaveConfigTypeDef sSlaveConfig = {0};
+  TIM_IC_InitTypeDef sConfigIC = {0};
+  TIM_MasterConfigTypeDef sMasterConfig = {0};
+
+  /* USER CODE BEGIN TIM5_Init 1 */
+
+  /* USER CODE END TIM5_Init 1 */
+  htim5.Instance = TIM5;
+  htim5.Init.Prescaler = 0;
+  htim5.Init.CounterMode = TIM_COUNTERMODE_UP;
+  htim5.Init.Period = 4294967295;
+  htim5.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
+  htim5.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
+  if (HAL_TIM_Base_Init(&htim5) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sClockSourceConfig.ClockSource = TIM_CLOCKSOURCE_INTERNAL;
+  if (HAL_TIM_ConfigClockSource(&htim5, &sClockSourceConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  if (HAL_TIM_IC_Init(&htim5) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sSlaveConfig.SlaveMode = TIM_SLAVEMODE_RESET;
+  sSlaveConfig.InputTrigger = TIM_TS_TI1FP1;
+  sSlaveConfig.TriggerPolarity = TIM_INPUTCHANNELPOLARITY_RISING;
+  sSlaveConfig.TriggerPrescaler = TIM_ICPSC_DIV1;
+  sSlaveConfig.TriggerFilter = 0;
+  if (HAL_TIM_SlaveConfigSynchro(&htim5, &sSlaveConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sConfigIC.ICPolarity = TIM_INPUTCHANNELPOLARITY_RISING;
+  sConfigIC.ICSelection = TIM_ICSELECTION_DIRECTTI;
+  sConfigIC.ICPrescaler = TIM_ICPSC_DIV1;
+  sConfigIC.ICFilter = 0;
+  if (HAL_TIM_IC_ConfigChannel(&htim5, &sConfigIC, TIM_CHANNEL_1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sConfigIC.ICPolarity = TIM_INPUTCHANNELPOLARITY_FALLING;
+  sConfigIC.ICSelection = TIM_ICSELECTION_INDIRECTTI;
+  if (HAL_TIM_IC_ConfigChannel(&htim5, &sConfigIC, TIM_CHANNEL_2) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sMasterConfig.MasterOutputTrigger = TIM_TRGO_RESET;
+  sMasterConfig.MasterSlaveMode = TIM_MASTERSLAVEMODE_DISABLE;
+  if (HAL_TIMEx_MasterConfigSynchronization(&htim5, &sMasterConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN TIM5_Init 2 */
+
+  /* USER CODE END TIM5_Init 2 */
+
+}
+
+/**
   * @brief USART1 Initialization Function
   * @param None
   * @retval None
@@ -465,10 +565,10 @@ static void MX_GPIO_Init(void)
   __HAL_RCC_GPIOD_CLK_ENABLE();
 
   /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOD, GPIO_PIN_15, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(GPIOD, GPIO_PIN_12, GPIO_PIN_RESET);
 
-  /*Configure GPIO pin : PD15 */
-  GPIO_InitStruct.Pin = GPIO_PIN_15;
+  /*Configure GPIO pin : PD12 */
+  GPIO_InitStruct.Pin = GPIO_PIN_12;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;

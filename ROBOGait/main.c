@@ -39,9 +39,9 @@
 #define DIAMETRO 0.203 //Diametro ruedas (m)
 
 //Pines E/S
-#define PIN_MODO GPIOD, GPIO_PIN_12 //Pin seleccion modo
-										//1 -> automatico | 0 -> manual
-
+#define PIN_MODO GPIOC, GPIO_PIN_13 //Pin seleccion modo y LED azul
+										//0 -> automatico | 1 -> manual
+										//OJO el LED va al contrario que el pin
 
 /* USER CODE END PD */
 
@@ -51,6 +51,10 @@
 /* USER CODE END PM */
 
 /* Private variables ---------------------------------------------------------*/
+ADC_HandleTypeDef hadc1;
+
+I2C_HandleTypeDef hi2c1;
+
 TIM_HandleTypeDef htim1;
 TIM_HandleTypeDef htim2;
 TIM_HandleTypeDef htim5;
@@ -71,18 +75,16 @@ float cam_cur; //Orientacion actual de la camara (º respecto al centro)
 
 //Variables fisicas solicitadas
 float v_in, w_in; //Valores solicitados de v y w (m/s)
-						//v_in -> w_motor -> d -> set_compare
 float cam_in; //Orientacion solicitada de la camara
-						//cam_in - cam_cur -> control -> d -> set_compare
+
 
 //Variables para medir encoder
 float v_count; //Contador auxiliar para temporizador
 float frequency; //Frecuencia pulsos = vueltas/seg
 
 //Variables para entrada receptor
-float rx_count; //Contador auxiliar para temporizador
-float duty; //Ciclo trabajo radio (5% - 10%)
-					//rx_count -> duty -> A/B -> pin modo
+float rc_count; //Contador auxiliar para temporizador
+float duty; //Ciclo trabajo PWM (5% - 10%)
 
 //Buffers y punteros comunicacion
 unsigned char *tx_ptr, *rx_ptr; //Punteros auxiliares para UART
@@ -104,10 +106,12 @@ unsigned char tx_buf[20], rx_buf[12]; //Buffers para transmision UART
 /* Private function prototypes -----------------------------------------------*/
 void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
-static void MX_TIM1_Init(void);
 static void MX_TIM2_Init(void);
-static void MX_USART1_UART_Init(void);
+static void MX_ADC1_Init(void);
+static void MX_TIM1_Init(void);
 static void MX_TIM5_Init(void);
+static void MX_USART1_UART_Init(void);
+static void MX_I2C1_Init(void);
 /* USER CODE BEGIN PFP */
 
 void HAL_TIM_IC_CaptureCallback(TIM_HandleTypeDef *htim)
@@ -126,10 +130,10 @@ void HAL_TIM_IC_CaptureCallback(TIM_HandleTypeDef *htim)
 	//PWM receptor
 	if (htim->Instance == TIM5 && htim->Channel == 1)
 	{
-		rx_count = HAL_TIM_ReadCapturedValue(htim, TIM_CHANNEL_1);
+		rc_count = HAL_TIM_ReadCapturedValue(htim, TIM_CHANNEL_1);
 
-		if (rx_count != 0)
-			duty = HAL_TIM_ReadCapturedValue(htim, TIM_CHANNEL_2) * 100 / rx_count;
+		if (rc_count != 0)
+			duty = HAL_TIM_ReadCapturedValue(htim, TIM_CHANNEL_2) * 100 / rc_count;
 	}
 }
 void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
@@ -203,21 +207,22 @@ int main(void)
 
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
-  MX_TIM1_Init();
   MX_TIM2_Init();
-  MX_USART1_UART_Init();
+  MX_ADC1_Init();
+  MX_TIM1_Init();
   MX_TIM5_Init();
+  MX_USART1_UART_Init();
+  MX_I2C1_Init();
   /* USER CODE BEGIN 2 */
 
-  //Inicio salidas PWM
-  HAL_TIM_PWM_Start_IT(&htim1, TIM_CHANNEL_1);
-  HAL_TIM_PWM_Start_IT(&htim1, TIM_CHANNEL_2);
-  HAL_TIM_PWM_Start_IT(&htim1, TIM_CHANNEL_3);
-  //Inicio mediciones PWM Input
-  HAL_TIM_IC_Start_IT(&htim2, TIM_CHANNEL_1); //Canal directo
-  HAL_TIM_IC_Start(&htim2, TIM_CHANNEL_2); //Canal indirecto
-  HAL_TIM_IC_Start_IT(&htim5, TIM_CHANNEL_1); //Canal directo
-  HAL_TIM_IC_Start(&htim5, TIM_CHANNEL_2); //Canal indirecto
+  //Inicio salidas control PWM
+  HAL_TIM_PWM_Start_IT(&htim1, TIM_CHANNEL_1); //Control ESC
+  HAL_TIM_PWM_Start_IT(&htim1, TIM_CHANNEL_2); //Control servo direccion
+  HAL_TIM_PWM_Start_IT(&htim1, TIM_CHANNEL_3); //Control servo camara
+  //Inicio medicion senales
+  HAL_TIM_IC_Start_IT(&htim2, TIM_CHANNEL_1); //Medicion encoder
+  HAL_TIM_IC_Start_IT(&htim5, TIM_CHANNEL_1); //Canal directo radio
+  HAL_TIM_IC_Start(&htim5, TIM_CHANNEL_2); //Canal indirecto radio
 
   //Primera recepcion UART
   HAL_UART_Receive_IT(&huart1, rx_buf, sizeof(rx_buf));
@@ -246,16 +251,23 @@ int main(void)
     /* USER CODE BEGIN 3 */
 
 	  //Seleccion modo
-	  	  if (duty < 8) HAL_GPIO_WritePin(PIN_MODO, 1); //Boton A - Modo automatico
-	  	  if (duty > 8) HAL_GPIO_WritePin(PIN_MODO, 0); //Boton B - Modo manual
+	  	  if (duty < 8) HAL_GPIO_WritePin(PIN_MODO, 0); //Boton A - Modo automatico
+	  	  if (duty > 8) HAL_GPIO_WritePin(PIN_MODO, 1); //Boton B - Modo manual
 
 	  //Medicion angulo direccion-----------------------------------------------------------------------------------TO DO
+	  	  	  //potenciometro -> ADC -> proporcion -> angulo servo -> angulo ruedas -> calibracion?
 	  //Medicion angulo camara--------------------------------------------------------------------------------------TO DO
+  	  	  	  //potenciometro -> ADC -> proporcion -> angulo camara -> calibracion?
 	  //Accion control sobre ESC------------------------------------------------------------------------------------TO DO
+	  	  	  //v_in -> w_motor -> d -> set_compare
 	  //Accion control sobre servo----------------------------------------------------------------------------------TO DO
+	  	  	  //w_in -> modelo cinematico -> angulo ruedas -> angulo servo -> d -> set_compare
 	  //Accion control sobre camara---------------------------------------------------------------------------------TO DO
+	  	  	  //cam_in -> filtro medias -> control -> d -> set_compare
 	  //Comunicacion MPU9250----------------------------------------------------------------------------------------TO DO
+	  	  	  //
 	  //Odometria---------------------------------------------------------------------------------------------------TO DO
+	  	  	  //
 
   }
   /* USER CODE END 3 */
@@ -298,6 +310,90 @@ void SystemClock_Config(void)
   {
     Error_Handler();
   }
+}
+
+/**
+  * @brief ADC1 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_ADC1_Init(void)
+{
+
+  /* USER CODE BEGIN ADC1_Init 0 */
+
+  /* USER CODE END ADC1_Init 0 */
+
+  ADC_ChannelConfTypeDef sConfig = {0};
+
+  /* USER CODE BEGIN ADC1_Init 1 */
+
+  /* USER CODE END ADC1_Init 1 */
+  /** Configure the global features of the ADC (Clock, Resolution, Data Alignment and number of conversion)
+  */
+  hadc1.Instance = ADC1;
+  hadc1.Init.ClockPrescaler = ADC_CLOCK_SYNC_PCLK_DIV2;
+  hadc1.Init.Resolution = ADC_RESOLUTION_12B;
+  hadc1.Init.ScanConvMode = DISABLE;
+  hadc1.Init.ContinuousConvMode = DISABLE;
+  hadc1.Init.DiscontinuousConvMode = DISABLE;
+  hadc1.Init.ExternalTrigConvEdge = ADC_EXTERNALTRIGCONVEDGE_NONE;
+  hadc1.Init.ExternalTrigConv = ADC_SOFTWARE_START;
+  hadc1.Init.DataAlign = ADC_DATAALIGN_RIGHT;
+  hadc1.Init.NbrOfConversion = 1;
+  hadc1.Init.DMAContinuousRequests = DISABLE;
+  hadc1.Init.EOCSelection = ADC_EOC_SINGLE_CONV;
+  if (HAL_ADC_Init(&hadc1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /** Configure for the selected ADC regular channel its corresponding rank in the sequencer and its sample time.
+  */
+  sConfig.Channel = ADC_CHANNEL_1;
+  sConfig.Rank = 1;
+  sConfig.SamplingTime = ADC_SAMPLETIME_3CYCLES;
+  if (HAL_ADC_ConfigChannel(&hadc1, &sConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN ADC1_Init 2 */
+
+  /* USER CODE END ADC1_Init 2 */
+
+}
+
+/**
+  * @brief I2C1 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_I2C1_Init(void)
+{
+
+  /* USER CODE BEGIN I2C1_Init 0 */
+
+  /* USER CODE END I2C1_Init 0 */
+
+  /* USER CODE BEGIN I2C1_Init 1 */
+
+  /* USER CODE END I2C1_Init 1 */
+  hi2c1.Instance = I2C1;
+  hi2c1.Init.ClockSpeed = 100000;
+  hi2c1.Init.DutyCycle = I2C_DUTYCYCLE_2;
+  hi2c1.Init.OwnAddress1 = 0;
+  hi2c1.Init.AddressingMode = I2C_ADDRESSINGMODE_7BIT;
+  hi2c1.Init.DualAddressMode = I2C_DUALADDRESS_DISABLE;
+  hi2c1.Init.OwnAddress2 = 0;
+  hi2c1.Init.GeneralCallMode = I2C_GENERALCALL_DISABLE;
+  hi2c1.Init.NoStretchMode = I2C_NOSTRETCH_DISABLE;
+  if (HAL_I2C_Init(&hi2c1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN I2C1_Init 2 */
+
+  /* USER CODE END I2C1_Init 2 */
+
 }
 
 /**
@@ -347,7 +443,7 @@ static void MX_TIM1_Init(void)
     Error_Handler();
   }
   sConfigOC.OCMode = TIM_OCMODE_PWM1;
-  sConfigOC.Pulse = 1000;
+  sConfigOC.Pulse = 1080;
   sConfigOC.OCPolarity = TIM_OCPOLARITY_HIGH;
   sConfigOC.OCNPolarity = TIM_OCNPOLARITY_HIGH;
   sConfigOC.OCFastMode = TIM_OCFAST_DISABLE;
@@ -357,12 +453,12 @@ static void MX_TIM1_Init(void)
   {
     Error_Handler();
   }
-  sConfigOC.Pulse = 1500;
+  sConfigOC.Pulse = 1440;
   if (HAL_TIM_PWM_ConfigChannel(&htim1, &sConfigOC, TIM_CHANNEL_2) != HAL_OK)
   {
     Error_Handler();
   }
-  sConfigOC.Pulse = 2000;
+  sConfigOC.Pulse = 1840;
   if (HAL_TIM_PWM_ConfigChannel(&htim1, &sConfigOC, TIM_CHANNEL_3) != HAL_OK)
   {
     Error_Handler();
@@ -455,7 +551,6 @@ static void MX_TIM5_Init(void)
 
   /* USER CODE END TIM5_Init 0 */
 
-  TIM_ClockConfigTypeDef sClockSourceConfig = {0};
   TIM_SlaveConfigTypeDef sSlaveConfig = {0};
   TIM_IC_InitTypeDef sConfigIC = {0};
   TIM_MasterConfigTypeDef sMasterConfig = {0};
@@ -469,15 +564,6 @@ static void MX_TIM5_Init(void)
   htim5.Init.Period = 4294967295;
   htim5.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
   htim5.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
-  if (HAL_TIM_Base_Init(&htim5) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  sClockSourceConfig.ClockSource = TIM_CLOCKSOURCE_INTERNAL;
-  if (HAL_TIM_ConfigClockSource(&htim5, &sClockSourceConfig) != HAL_OK)
-  {
-    Error_Handler();
-  }
   if (HAL_TIM_IC_Init(&htim5) != HAL_OK)
   {
     Error_Handler();
@@ -560,19 +646,19 @@ static void MX_GPIO_Init(void)
   GPIO_InitTypeDef GPIO_InitStruct = {0};
 
   /* GPIO Ports Clock Enable */
+  __HAL_RCC_GPIOC_CLK_ENABLE();
   __HAL_RCC_GPIOA_CLK_ENABLE();
-  __HAL_RCC_GPIOE_CLK_ENABLE();
-  __HAL_RCC_GPIOD_CLK_ENABLE();
+  __HAL_RCC_GPIOB_CLK_ENABLE();
 
   /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOD, GPIO_PIN_12, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(GPIOC, GPIO_PIN_13, GPIO_PIN_RESET);
 
-  /*Configure GPIO pin : PD12 */
-  GPIO_InitStruct.Pin = GPIO_PIN_12;
+  /*Configure GPIO pin : PC13 */
+  GPIO_InitStruct.Pin = GPIO_PIN_13;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-  HAL_GPIO_Init(GPIOD, &GPIO_InitStruct);
+  HAL_GPIO_Init(GPIOC, &GPIO_InitStruct);
 
 }
 

@@ -36,12 +36,11 @@
 #define PI 3.14159265359
 #define FRECUENCIA 16000000 //Frecuencia reloj interno (Hz)
 #define REDUCCION 30 //Reducion en la transmision
-#define DIAMETRO 0.203 //Diametro ruedas (m)
+#define RADIO 0.1 //Radio ruedas (m)
 
 //Pines E/S
-#define PIN_MODO GPIOC, GPIO_PIN_13 //Pin seleccion modo y LED azul
-										//0 -> automatico | 1 -> manual
-										//OJO el LED va al contrario que el pin
+#define PIN_MODO GPIOC, GPIO_PIN_13 //Pin seleccion modo y LED azul (encendido a nivel bajo)
+										//0 -> automatico, LED ON | 1 -> manual, LED OFF
 
 /* USER CODE END PD */
 
@@ -77,6 +76,10 @@ float cam_cur; //Orientacion actual de la camara (º respecto al centro)
 float v_in, w_in; //Valores solicitados de v y w (m/s)
 float cam_in; //Orientacion solicitada de la camara
 
+//Variables salida del control
+float motor, d_motor; //Control ESC
+float d_direccion; //Control servo
+float d_camara; //Control camara
 
 //Variables para medir encoder
 float v_count; //Contador auxiliar para temporizador
@@ -126,7 +129,6 @@ void HAL_TIM_IC_CaptureCallback(TIM_HandleTypeDef *htim)
 		__HAL_TIM_SET_COUNTER(htim, 0);
 	}
 
-
 	//PWM receptor
 	if (htim->Instance == TIM5 && htim->Channel == 1)
 	{
@@ -147,8 +149,7 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 		for (int i = 4; i < 8; i++) *(rx_ptr + i) = rx_buf[i];
 		rx_ptr = (unsigned char*) &cam_in; //Angulo camara (requerido)
 		for (int i = 8; i < 12; i++) *(rx_ptr + i) = rx_buf[i];
-		//Nueva recepcion mensaje
-		HAL_UART_Receive_IT(&huart1, rx_buf, sizeof(rx_buf));
+		//Nueva recepcion mensaje?
 	}
 }
 
@@ -167,8 +168,7 @@ void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart)
 		for (int i = 12; i < 16; i++) tx_buf[i] = *(tx_ptr + i);
 		tx_ptr = (unsigned char*) &cam_cur; //Angulo camara (actual)
 		for (int i = 16; i < 20; i++) tx_buf[i] = *(tx_ptr + i);
-		//Nuevo envio mensaje
-		HAL_UART_Transmit_IT(&huart1, tx_buf, sizeof(tx_buf));
+		//Nuevo envio mensaje?
 	}
 }
 
@@ -224,50 +224,61 @@ int main(void)
   HAL_TIM_IC_Start_IT(&htim5, TIM_CHANNEL_1); //Canal directo radio
   HAL_TIM_IC_Start(&htim5, TIM_CHANNEL_2); //Canal indirecto radio
 
-  //Primera recepcion UART
-  HAL_UART_Receive_IT(&huart1, rx_buf, sizeof(rx_buf));
-
-  //Primera transmision UART
-  tx_ptr = (unsigned char*) &px_cur; //Posicion x (actual)
-  for (int i = 0; i < 4; i++) tx_buf[i] = *(tx_ptr + i);
-  tx_ptr = (unsigned char*) &py_cur; //Posicion y (actual)
-  for (int i = 4; i < 8; i++) tx_buf[i] = *(tx_ptr + i);
-  tx_ptr = (unsigned char*) &v_cur; //Velocidad x (actual)
-  for (int i = 8; i < 12; i++) tx_buf[i] = *(tx_ptr + i);
-  tx_ptr = (unsigned char*) &w_cur; //Rotacion z (actual)
-  for (int i = 12; i < 16; i++) tx_buf[i] = *(tx_ptr + i);
-  tx_ptr = (unsigned char*) &cam_cur; //Angulo camara (actual)
-  for (int i = 16; i < 20; i++) tx_buf[i] = *(tx_ptr + i);
-  HAL_UART_Transmit_IT(&huart1, tx_buf, sizeof(tx_buf));
-
   /* USER CODE END 2 */
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
   while (1)
   {
-    /* USER CODE END WHILE */
-
-    /* USER CODE BEGIN 3 */
-
 	  //Seleccion modo
 	  	  if (duty < 8) HAL_GPIO_WritePin(PIN_MODO, 0); //Boton A - Modo automatico
 	  	  if (duty > 8) HAL_GPIO_WritePin(PIN_MODO, 1); //Boton B - Modo manual
 
-	  //Medicion angulo direccion-----------------------------------------------------------------------------------TO DO
-	  	  	  //potenciometro -> ADC -> proporcion -> angulo servo -> angulo ruedas -> calibracion?
-	  //Medicion angulo camara--------------------------------------------------------------------------------------TO DO
-  	  	  	  //potenciometro -> ADC -> proporcion -> angulo camara -> calibracion?
-	  //Accion control sobre ESC------------------------------------------------------------------------------------TO DO
-	  	  	  //v_in -> w_motor -> d -> set_compare
+	  //Recepcion mensaje UART
+	  	  HAL_UART_Receive_IT(&huart1, rx_buf, sizeof(rx_buf));
+
+	  //Accion control sobre ESC: v_in -> motor -> d -> set_compare
+		  motor = v_in * REDUCCION / (RADIO * 2 * PI * 60); //Velocidad deseada motor (rpm)
+		  	  if (motor > 0) d_motor = motor / 385419 + 1.519; //Rango directo
+		  	  else d_motor = motor / 354415 + 1.477; //Rango inverso
+		  __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, 1000 * d_motor); //Salida del control
+
 	  //Accion control sobre servo----------------------------------------------------------------------------------TO DO
-	  	  	  //w_in -> modelo cinematico -> angulo ruedas -> angulo servo -> d -> set_compare
+		  //w_in -> modelo cinematico -> angulo ruedas -> angulo servo -> d -> set_compare
+
 	  //Accion control sobre camara---------------------------------------------------------------------------------TO DO
-	  	  	  //cam_in -> filtro medias -> control -> d -> set_compare
+		  //cam_in -> filtro medias -> control -> d -> set_compare
+
+	  //Medicion angulo direccion-----------------------------------------------------------------------------------TO DO
+	  	  //potenciometro -> ADC -> proporcion -> angulo servo -> angulo ruedas -> calibracion?
+
+	  //Medicion angulo camara--------------------------------------------------------------------------------------TO DO
+  	   	  //potenciometro -> ADC -> proporcion -> angulo camara -> calibracion?
+
 	  //Comunicacion MPU9250----------------------------------------------------------------------------------------TO DO
-	  	  	  //
+	  	  //
+
 	  //Odometria---------------------------------------------------------------------------------------------------TO DO
-	  	  	  //
+	  	  //
+		  v_cur = frequency * 2 * PI * RADIO / REDUCCION;
+
+
+	  //Transmision mensaje UART
+	  	  tx_ptr = (unsigned char*) &px_cur; //Posicion x (actual)
+	  	  for (int i = 0; i < 4; i++) tx_buf[i] = *(tx_ptr + i);
+	  	  tx_ptr = (unsigned char*) &py_cur; //Posicion y (actual)
+	  	  for (int i = 4; i < 8; i++) tx_buf[i] = *(tx_ptr + i);
+	  	  tx_ptr = (unsigned char*) &v_cur; //Velocidad x (actual)
+	  	  for (int i = 8; i < 12; i++) tx_buf[i] = *(tx_ptr + i);
+	  	  tx_ptr = (unsigned char*) &w_cur; //Rotacion z (actual)
+	  	  for (int i = 12; i < 16; i++) tx_buf[i] = *(tx_ptr + i);
+	  	  tx_ptr = (unsigned char*) &cam_cur; //Angulo camara (actual)
+	  	  for (int i = 16; i < 20; i++) tx_buf[i] = *(tx_ptr + i);
+	  	  HAL_UART_Transmit_IT(&huart1, tx_buf, sizeof(tx_buf));
+
+    /* USER CODE END WHILE */
+
+    /* USER CODE BEGIN 3 */
 
   }
   /* USER CODE END 3 */

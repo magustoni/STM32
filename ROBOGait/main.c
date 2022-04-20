@@ -42,6 +42,10 @@
 #define PIN_MODO GPIOC, GPIO_PIN_13 //Pin seleccion modo y LED azul (encendido a nivel bajo)
 										//0 -> automatico, LED ON | 1 -> manual, LED OFF
 
+//Valores analogicos servos en posicion central
+#define CENTRO_DIR 2000 //Servo direccion
+#define CENTRO_CAM 2000 //Servo camara
+
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -50,7 +54,8 @@
 /* USER CODE END PM */
 
 /* Private variables ---------------------------------------------------------*/
-ADC_HandleTypeDef hadc1;
+ ADC_HandleTypeDef hadc1;
+DMA_HandleTypeDef hdma_adc1;
 
 I2C_HandleTypeDef hi2c1;
 
@@ -67,10 +72,12 @@ float px_cur, py_cur; //Valores actuales de x,y (m)
 						//odometria -> x,y
 float v_cur, w_cur; //Valores actuales de v y w (m/s)
 						//cuenta temp -> giro motor -> v_cur
-float dir_cur; //Orientacion actual de la direcicon (º respecto al centro)
+float dir_cur; //Orientacion actual de la direcicon (º respecto al centro en sentido horario)
 						//realimentacion -> ADC -> º
-float cam_cur; //Orientacion actual de la camara (º respecto al centro)
+float cam_cur; //Orientacion actual de la camara (º respecto al centro en sentido horario)
 						//realimentacion -> ADC -> º
+int adc_buf[2]; //Buffer para converison ADC
+
 
 //Variables fisicas solicitadas
 float v_in, w_in; //Valores solicitados de v y w (m/s)
@@ -113,8 +120,9 @@ static void MX_TIM2_Init(void);
 static void MX_ADC1_Init(void);
 static void MX_TIM1_Init(void);
 static void MX_TIM5_Init(void);
-static void MX_USART1_UART_Init(void);
+static void MX_DMA_Init(void);
 static void MX_I2C1_Init(void);
+static void MX_USART1_UART_Init(void);
 /* USER CODE BEGIN PFP */
 
 void HAL_TIM_IC_CaptureCallback(TIM_HandleTypeDef *htim)
@@ -211,75 +219,82 @@ int main(void)
   MX_ADC1_Init();
   MX_TIM1_Init();
   MX_TIM5_Init();
-  MX_USART1_UART_Init();
+  MX_DMA_Init();
   MX_I2C1_Init();
+  MX_USART1_UART_Init();
   /* USER CODE BEGIN 2 */
 
   //Inicio salidas control PWM
   HAL_TIM_PWM_Start_IT(&htim1, TIM_CHANNEL_1); //Control ESC
   HAL_TIM_PWM_Start_IT(&htim1, TIM_CHANNEL_2); //Control servo direccion
   HAL_TIM_PWM_Start_IT(&htim1, TIM_CHANNEL_3); //Control servo camara
+
   //Inicio medicion senales
   HAL_TIM_IC_Start_IT(&htim2, TIM_CHANNEL_1); //Medicion encoder
   HAL_TIM_IC_Start_IT(&htim5, TIM_CHANNEL_1); //Canal directo radio
   HAL_TIM_IC_Start(&htim5, TIM_CHANNEL_2); //Canal indirecto radio
+
+  //Inicio conversion ADC por DMA
+  HAL_ADC_Start_DMA(&hadc1, adc_buf, 2);
 
   /* USER CODE END 2 */
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
   while (1)
-  {
-	  //Seleccion modo
-	  	  if (duty < 8) HAL_GPIO_WritePin(PIN_MODO, 0); //Boton A - Modo automatico
-	  	  if (duty > 8) HAL_GPIO_WritePin(PIN_MODO, 1); //Boton B - Modo manual
+    {
+  	  //Seleccion modo
+  	  	  if (duty < 6) HAL_GPIO_WritePin(PIN_MODO, 0); //Boton A - Modo automatico
+  	  	  	  //Valores intermedios: boton sin pulsar, el modo de funcionamiento se mantiene
+  	  	  if (duty > 8) HAL_GPIO_WritePin(PIN_MODO, 1); //Boton B - Modo manual
 
-	  //Recepcion mensaje UART
-	  	  HAL_UART_Receive_IT(&huart1, rx_buf, sizeof(rx_buf));
+  	  //Recepcion mensaje UART
+  	  	  //HAL_UART_Receive_IT(&huart1, rx_buf, sizeof(rx_buf));
+v_in = 5;
+  	  //Accion control sobre ESC: v_in -> motor -> d -> set_compare
+  		  motor = v_in * REDUCCION * 60 / (2 * PI * RADIO); //Velocidad deseada motor (rpm)
+  		  	  if (motor > 0) d_motor = motor / 385419 + 1.519; //Rango directo
+  		  	  else d_motor = motor / 354415 + 1.477; //Rango inverso
+  		  __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, 1000 * d_motor); //Salida del control
 
-	  //Accion control sobre ESC: v_in -> motor -> d -> set_compare
-		  motor = v_in * REDUCCION / (RADIO * 2 * PI * 60); //Velocidad deseada motor (rpm)
-		  	  if (motor > 0) d_motor = motor / 385419 + 1.519; //Rango directo
-		  	  else d_motor = motor / 354415 + 1.477; //Rango inverso
-		  __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, 1000 * d_motor); //Salida del control
+  	  //Accion control sobre servo----------------------------------------------------------------------------------TO DO
+  		  //w_in -> modelo cinematico -> angulo ruedas -> angulo servo -> d -> set_compare
 
-	  //Accion control sobre servo----------------------------------------------------------------------------------TO DO
-		  //w_in -> modelo cinematico -> angulo ruedas -> angulo servo -> d -> set_compare
+  	  //Accion control sobre camara---------------------------------------------------------------------------------TO DO
+  		  //cam_in -> filtro medias -> control -> d -> set_compare
 
-	  //Accion control sobre camara---------------------------------------------------------------------------------TO DO
-		  //cam_in -> filtro medias -> control -> d -> set_compare
+  	  //Medicion angulo direccion-----------------------------------------------------------------------------------TO DO
+  	  	  //potenciometro -> ADC -> proporcion -> angulo servo -> angulo ruedas -> calibracion?
+  		  dir_cur = (adc_buf[0] - CENTRO_DIR);
 
-	  //Medicion angulo direccion-----------------------------------------------------------------------------------TO DO
-	  	  //potenciometro -> ADC -> proporcion -> angulo servo -> angulo ruedas -> calibracion?
+  	  //Medicion angulo camara--------------------------------------------------------------------------------------TO DO
+    	  //potenciometro -> ADC -> proporcion -> angulo camara
+  		  cam_cur = (adc_buf[1] - CENTRO_CAM);
 
-	  //Medicion angulo camara--------------------------------------------------------------------------------------TO DO
-  	   	  //potenciometro -> ADC -> proporcion -> angulo camara -> calibracion?
+  	  //Comunicacion MPU9250----------------------------------------------------------------------------------------TO DO
+  	  	  //
 
-	  //Comunicacion MPU9250----------------------------------------------------------------------------------------TO DO
-	  	  //
-
-	  //Odometria---------------------------------------------------------------------------------------------------TO DO
-	  	  //
-		  v_cur = frequency * 2 * PI * RADIO / REDUCCION;
+  	  //Odometria---------------------------------------------------------------------------------------------------TO DO
+  	  	  //
+  		  v_cur = frequency * 2 * PI * RADIO / REDUCCION;
 
 
-	  //Transmision mensaje UART
-	  	  tx_ptr = (unsigned char*) &px_cur; //Posicion x (actual)
-	  	  for (int i = 0; i < 4; i++) tx_buf[i] = *(tx_ptr + i);
-	  	  tx_ptr = (unsigned char*) &py_cur; //Posicion y (actual)
-	  	  for (int i = 4; i < 8; i++) tx_buf[i] = *(tx_ptr + i);
-	  	  tx_ptr = (unsigned char*) &v_cur; //Velocidad x (actual)
-	  	  for (int i = 8; i < 12; i++) tx_buf[i] = *(tx_ptr + i);
-	  	  tx_ptr = (unsigned char*) &w_cur; //Rotacion z (actual)
-	  	  for (int i = 12; i < 16; i++) tx_buf[i] = *(tx_ptr + i);
-	  	  tx_ptr = (unsigned char*) &cam_cur; //Angulo camara (actual)
-	  	  for (int i = 16; i < 20; i++) tx_buf[i] = *(tx_ptr + i);
-	  	  HAL_UART_Transmit_IT(&huart1, tx_buf, sizeof(tx_buf));
+  	  //Transmision mensaje UART
+  	  	  tx_ptr = (unsigned char*) &px_cur; //Posicion x (actual)
+  	  	  for (int i = 0; i < 4; i++) tx_buf[i] = *(tx_ptr + i);
+  	  	  tx_ptr = (unsigned char*) &py_cur; //Posicion y (actual)
+  	  	  for (int i = 4; i < 8; i++) tx_buf[i] = *(tx_ptr + i);
+  	  	  tx_ptr = (unsigned char*) &v_cur; //Velocidad x (actual)
+  	  	  for (int i = 8; i < 12; i++) tx_buf[i] = *(tx_ptr + i);
+  	  	  tx_ptr = (unsigned char*) &w_cur; //Rotacion z (actual)
+  	  	  for (int i = 12; i < 16; i++) tx_buf[i] = *(tx_ptr + i);
+  	  	  tx_ptr = (unsigned char*) &cam_cur; //Angulo camara (actual)
+  	  	  for (int i = 16; i < 20; i++) tx_buf[i] = *(tx_ptr + i);
+  	  	  //HAL_UART_Transmit_IT(&huart1, tx_buf, sizeof(tx_buf));
 
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
-
   }
   /* USER CODE END 3 */
 }
@@ -297,6 +312,7 @@ void SystemClock_Config(void)
   */
   __HAL_RCC_PWR_CLK_ENABLE();
   __HAL_PWR_VOLTAGESCALING_CONFIG(PWR_REGULATOR_VOLTAGE_SCALE1);
+
   /** Initializes the RCC Oscillators according to the specified parameters
   * in the RCC_OscInitTypeDef structure.
   */
@@ -308,6 +324,7 @@ void SystemClock_Config(void)
   {
     Error_Handler();
   }
+
   /** Initializes the CPU, AHB and APB buses clocks
   */
   RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK|RCC_CLOCKTYPE_SYSCLK
@@ -340,29 +357,40 @@ static void MX_ADC1_Init(void)
   /* USER CODE BEGIN ADC1_Init 1 */
 
   /* USER CODE END ADC1_Init 1 */
+
   /** Configure the global features of the ADC (Clock, Resolution, Data Alignment and number of conversion)
   */
   hadc1.Instance = ADC1;
   hadc1.Init.ClockPrescaler = ADC_CLOCK_SYNC_PCLK_DIV2;
   hadc1.Init.Resolution = ADC_RESOLUTION_12B;
-  hadc1.Init.ScanConvMode = DISABLE;
-  hadc1.Init.ContinuousConvMode = DISABLE;
+  hadc1.Init.ScanConvMode = ENABLE;
+  hadc1.Init.ContinuousConvMode = ENABLE;
   hadc1.Init.DiscontinuousConvMode = DISABLE;
   hadc1.Init.ExternalTrigConvEdge = ADC_EXTERNALTRIGCONVEDGE_NONE;
   hadc1.Init.ExternalTrigConv = ADC_SOFTWARE_START;
   hadc1.Init.DataAlign = ADC_DATAALIGN_RIGHT;
-  hadc1.Init.NbrOfConversion = 1;
-  hadc1.Init.DMAContinuousRequests = DISABLE;
+  hadc1.Init.NbrOfConversion = 2;
+  hadc1.Init.DMAContinuousRequests = ENABLE;
   hadc1.Init.EOCSelection = ADC_EOC_SINGLE_CONV;
   if (HAL_ADC_Init(&hadc1) != HAL_OK)
   {
     Error_Handler();
   }
+
   /** Configure for the selected ADC regular channel its corresponding rank in the sequencer and its sample time.
   */
   sConfig.Channel = ADC_CHANNEL_1;
   sConfig.Rank = 1;
-  sConfig.SamplingTime = ADC_SAMPLETIME_3CYCLES;
+  sConfig.SamplingTime = ADC_SAMPLETIME_15CYCLES;
+  if (HAL_ADC_ConfigChannel(&hadc1, &sConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+
+  /** Configure for the selected ADC regular channel its corresponding rank in the sequencer and its sample time.
+  */
+  sConfig.Channel = ADC_CHANNEL_2;
+  sConfig.Rank = 2;
   if (HAL_ADC_ConfigChannel(&hadc1, &sConfig) != HAL_OK)
   {
     Error_Handler();
@@ -454,7 +482,7 @@ static void MX_TIM1_Init(void)
     Error_Handler();
   }
   sConfigOC.OCMode = TIM_OCMODE_PWM1;
-  sConfigOC.Pulse = 1080;
+  sConfigOC.Pulse = 1480;
   sConfigOC.OCPolarity = TIM_OCPOLARITY_HIGH;
   sConfigOC.OCNPolarity = TIM_OCNPOLARITY_HIGH;
   sConfigOC.OCFastMode = TIM_OCFAST_DISABLE;
@@ -464,12 +492,12 @@ static void MX_TIM1_Init(void)
   {
     Error_Handler();
   }
-  sConfigOC.Pulse = 1440;
+  sConfigOC.Pulse = 5000;
   if (HAL_TIM_PWM_ConfigChannel(&htim1, &sConfigOC, TIM_CHANNEL_2) != HAL_OK)
   {
     Error_Handler();
   }
-  sConfigOC.Pulse = 1840;
+  sConfigOC.Pulse = 10000;
   if (HAL_TIM_PWM_ConfigChannel(&htim1, &sConfigOC, TIM_CHANNEL_3) != HAL_OK)
   {
     Error_Handler();
@@ -648,6 +676,22 @@ static void MX_USART1_UART_Init(void)
 }
 
 /**
+  * Enable DMA controller clock
+  */
+static void MX_DMA_Init(void)
+{
+
+  /* DMA controller clock enable */
+  __HAL_RCC_DMA2_CLK_ENABLE();
+
+  /* DMA interrupt init */
+  /* DMA2_Stream0_IRQn interrupt configuration */
+  HAL_NVIC_SetPriority(DMA2_Stream0_IRQn, 0, 0);
+  HAL_NVIC_EnableIRQ(DMA2_Stream0_IRQn);
+
+}
+
+/**
   * @brief GPIO Initialization Function
   * @param None
   * @retval None
@@ -708,4 +752,3 @@ void assert_failed(uint8_t *file, uint32_t line)
   /* USER CODE END 6 */
 }
 #endif /* USE_FULL_ASSERT */
-

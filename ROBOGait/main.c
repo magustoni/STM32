@@ -97,8 +97,8 @@ float rc_count; //Contador auxiliar para temporizador
 float duty; //Ciclo trabajo PWM (5% - 10%)
 
 //Buffers y punteros comunicacion
-unsigned char *tx_ptr, *rx_ptr; //Punteros auxiliares para UART
-unsigned char tx_buf[20], rx_buf[12]; //Buffers para transmision UART
+uint8_t *tx_ptr, *rx_ptr; //Punteros auxiliares para UART
+uint8_t tx_buf[20], rx_buf[12]; //Buffers para transmision UART
 										//Mensaje de salida:
 											//Bytes 0-3: rx_cur
 											//Bytes 4-7: ry_cur
@@ -151,13 +151,14 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 	if(huart == &huart1)
 	{
 		//Comprension mensaje entrante
-		rx_ptr = (unsigned char*) &v_in; //Velocidad x (requerida)
+		rx_ptr = (uint8_t*) &v_in; //Velocidad x (requerida)
 		for (int i = 0; i < 4; i++) *(rx_ptr + i) = rx_buf[i];
-		rx_ptr = (unsigned char*) &w_in; //Rotacion z (requerida)
-		for (int i = 4; i < 8; i++) *(rx_ptr + i) = rx_buf[i];
-		rx_ptr = (unsigned char*) &cam_in; //Angulo camara (requerido)
-		for (int i = 8; i < 12; i++) *(rx_ptr + i) = rx_buf[i];
-		//Nueva recepcion mensaje?
+		rx_ptr = (uint8_t*) &w_in; //Rotacion z (requerida)
+		for (int i = 0; i < 4; i++) *(rx_ptr + i) = rx_buf[i + 4];
+		rx_ptr = (uint8_t*) &cam_in; //Angulo camara (requerido)
+		for (int i = 0; i < 4; i++) *(rx_ptr + i) = rx_buf[i + 8];
+		//Nueva recepcion mensaje
+		HAL_UART_Receive_IT(&huart1, rx_buf, sizeof(rx_buf));
 	}
 }
 
@@ -166,17 +167,18 @@ void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart)
 	if(huart == &huart1)
 	{
 		//Formacion mensaje saliente
-		tx_ptr = (unsigned char*) &px_cur; //Posicion x (actual)
+		tx_ptr = (uint8_t*) &px_cur; //Posicion x (actual)
 		for (int i = 0; i < 4; i++) tx_buf[i] = *(tx_ptr + i);
-		tx_ptr = (unsigned char*) &py_cur; //Posicion y (actual)
-		for (int i = 4; i < 8; i++) tx_buf[i] = *(tx_ptr + i);
-		tx_ptr = (unsigned char*) &v_cur; //Velocidad x (actual)
-		for (int i = 8; i < 12; i++) tx_buf[i] = *(tx_ptr + i);
-		tx_ptr = (unsigned char*) &w_cur; //Rotacion z (actual)
-		for (int i = 12; i < 16; i++) tx_buf[i] = *(tx_ptr + i);
-		tx_ptr = (unsigned char*) &cam_cur; //Angulo camara (actual)
-		for (int i = 16; i < 20; i++) tx_buf[i] = *(tx_ptr + i);
-		//Nuevo envio mensaje?
+		tx_ptr = (uint8_t*) &py_cur; //Posicion y (actual)
+		for (int i = 0; i < 4; i++) tx_buf[i + 4] = *(tx_ptr + i);
+		tx_ptr = (uint8_t*) &v_cur; //Velocidad x (actual)
+		for (int i = 0; i < 4; i++) tx_buf[i + 8] = *(tx_ptr + i);
+		tx_ptr = (uint8_t*) &w_cur; //Rotacion z (actual)
+		for (int i = 0; i < 4; i++) tx_buf[i + 12] = *(tx_ptr + i);
+		tx_ptr = (uint8_t*) &cam_cur; //Angulo camara (actual)
+		for (int i = 0; i < 4; i++) tx_buf[i + 16] = *(tx_ptr + i);
+		//Nueva transmision mensaje
+		HAL_UART_Transmit_IT(&huart1, tx_buf, sizeof(tx_buf));
 	}
 }
 
@@ -224,10 +226,20 @@ int main(void)
   MX_USART1_UART_Init();
   /* USER CODE BEGIN 2 */
 
+  //Primera recepcion UART
+  HAL_UART_Receive_IT(&huart1, rx_buf, sizeof(rx_buf));
+
+  //Primera transmision UART
+  for (int i = 0; i < sizeof(tx_buf); i++) tx_buf[i] = 0x00;
+  HAL_UART_Transmit_IT(&huart1, tx_buf, sizeof(tx_buf));
+
   //Inicio salidas control PWM
+  __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, 1500); //Punto neutro ESC para iniciarla
   HAL_TIM_PWM_Start_IT(&htim1, TIM_CHANNEL_1); //Control ESC
   HAL_TIM_PWM_Start_IT(&htim1, TIM_CHANNEL_2); //Control servo direccion
   HAL_TIM_PWM_Start_IT(&htim1, TIM_CHANNEL_3); //Control servo camara
+
+  HAL_Delay(2000); //Esperar al arranque de la ESC
 
   //Inicio medicion senales
   HAL_TIM_IC_Start_IT(&htim2, TIM_CHANNEL_1); //Medicion encoder
@@ -236,6 +248,9 @@ int main(void)
 
   //Inicio conversion ADC por DMA
   HAL_ADC_Start_DMA(&hadc1, adc_buf, 2);
+	  w_cur = 6.9;
+	  px_cur = 1.2;
+	  py_cur = 2.3;
 
   /* USER CODE END 2 */
 
@@ -248,9 +263,6 @@ int main(void)
   	  	  	  //Valores intermedios: boton sin pulsar, el modo de funcionamiento se mantiene
   	  	  if (duty > 8) HAL_GPIO_WritePin(PIN_MODO, 1); //Boton B - Modo manual
 
-  	  //Recepcion mensaje UART
-  	  	  //HAL_UART_Receive_IT(&huart1, rx_buf, sizeof(rx_buf));
-v_in = 5;
   	  //Accion control sobre ESC: v_in -> motor -> d -> set_compare
   		  motor = v_in * REDUCCION * 60 / (2 * PI * RADIO); //Velocidad deseada motor (rpm)
   		  	  if (motor > 0) d_motor = motor / 385419 + 1.519; //Rango directo
@@ -259,17 +271,21 @@ v_in = 5;
 
   	  //Accion control sobre servo----------------------------------------------------------------------------------TO DO
   		  //w_in -> modelo cinematico -> angulo ruedas -> angulo servo -> d -> set_compare
+  		  d_direccion = w_in;
+  		  __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_2, 1000 * d_direccion); //Salida del control
 
   	  //Accion control sobre camara---------------------------------------------------------------------------------TO DO
   		  //cam_in -> filtro medias -> control -> d -> set_compare
+  		  d_camara = cam_in;
+  		  __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_3, 1000 * d_camara); //Salida del control
 
   	  //Medicion angulo direccion-----------------------------------------------------------------------------------TO DO
   	  	  //potenciometro -> ADC -> proporcion -> angulo servo -> angulo ruedas -> calibracion?
-  		  dir_cur = (adc_buf[0] - CENTRO_DIR);
+  		  dir_cur = adc_buf[0];
 
   	  //Medicion angulo camara--------------------------------------------------------------------------------------TO DO
     	  //potenciometro -> ADC -> proporcion -> angulo camara
-  		  cam_cur = (adc_buf[1] - CENTRO_CAM);
+  		  cam_cur = adc_buf[1];
 
   	  //Comunicacion MPU9250----------------------------------------------------------------------------------------TO DO
   	  	  //
@@ -278,19 +294,6 @@ v_in = 5;
   	  	  //
   		  v_cur = frequency * 2 * PI * RADIO / REDUCCION;
 
-
-  	  //Transmision mensaje UART
-  	  	  tx_ptr = (unsigned char*) &px_cur; //Posicion x (actual)
-  	  	  for (int i = 0; i < 4; i++) tx_buf[i] = *(tx_ptr + i);
-  	  	  tx_ptr = (unsigned char*) &py_cur; //Posicion y (actual)
-  	  	  for (int i = 4; i < 8; i++) tx_buf[i] = *(tx_ptr + i);
-  	  	  tx_ptr = (unsigned char*) &v_cur; //Velocidad x (actual)
-  	  	  for (int i = 8; i < 12; i++) tx_buf[i] = *(tx_ptr + i);
-  	  	  tx_ptr = (unsigned char*) &w_cur; //Rotacion z (actual)
-  	  	  for (int i = 12; i < 16; i++) tx_buf[i] = *(tx_ptr + i);
-  	  	  tx_ptr = (unsigned char*) &cam_cur; //Angulo camara (actual)
-  	  	  for (int i = 16; i < 20; i++) tx_buf[i] = *(tx_ptr + i);
-  	  	  //HAL_UART_Transmit_IT(&huart1, tx_buf, sizeof(tx_buf));
 
     /* USER CODE END WHILE */
 
@@ -658,7 +661,7 @@ static void MX_USART1_UART_Init(void)
 
   /* USER CODE END USART1_Init 1 */
   huart1.Instance = USART1;
-  huart1.Init.BaudRate = 115200;
+  huart1.Init.BaudRate = 9600;
   huart1.Init.WordLength = UART_WORDLENGTH_8B;
   huart1.Init.StopBits = UART_STOPBITS_1;
   huart1.Init.Parity = UART_PARITY_NONE;

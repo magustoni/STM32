@@ -42,9 +42,6 @@
 #define PIN_MODO GPIOC, GPIO_PIN_13 //Pin seleccion modo y LED azul (encendido a nivel bajo)
 										//0 -> automatico, LED ON | 1 -> manual, LED OFF
 
-//Valores analogicos servos en posicion central
-#define CENTRO_DIR 2000 //Servo direccion
-#define CENTRO_CAM 2000 //Servo camara
 
 /* USER CODE END PD */
 
@@ -96,19 +93,10 @@ float frequency; //Frecuencia pulsos = vueltas/seg
 float rc_count; //Contador auxiliar para temporizador
 float duty; //Ciclo trabajo PWM (5% - 10%)
 
-//Buffers y punteros comunicacion
-uint8_t *tx_ptr, *rx_ptr; //Punteros auxiliares para UART
-uint8_t tx_buf[20], rx_buf[12]; //Buffers para transmision UART
-										//Mensaje de salida:
-											//Bytes 0-3: rx_cur
-											//Bytes 4-7: ry_cur
-											//Bytes 8-11: v_cur
-											//Bytes 12-15: w_cur
-											//Bytes 16-19: cam_cur
-										//Mensaje de entrada:
-											//Bytes 0-3: v_in
-											//Bytes 4-7: w_in
-											//Bytes 8-11: cam_in
+//Buffers para transmision UART
+float tx_buf[5], rx_buf[3];
+		//Mensaje de salida: rx_cur, ry_cur, v_cur, w_cur, cam_cur
+		//Mensaje de entrada: v_in, w_in, cam_in
 
 
 /* USER CODE END PV */
@@ -150,15 +138,8 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 {
 	if(huart == &huart1)
 	{
-		//Comprension mensaje entrante
-		rx_ptr = (uint8_t*) &v_in; //Velocidad x (requerida)
-		for (int i = 0; i < 4; i++) *(rx_ptr + i) = rx_buf[i];
-		rx_ptr = (uint8_t*) &w_in; //Rotacion z (requerida)
-		for (int i = 0; i < 4; i++) *(rx_ptr + i) = rx_buf[i + 4];
-		rx_ptr = (uint8_t*) &cam_in; //Angulo camara (requerido)
-		for (int i = 0; i < 4; i++) *(rx_ptr + i) = rx_buf[i + 8];
-		//Nueva recepcion mensaje
-		HAL_UART_Receive_IT(&huart1, rx_buf, sizeof(rx_buf));
+		//Nueva transmision mensaje
+  	  	HAL_UART_Transmit_IT(&huart1, tx_buf, 5 * sizeof(float));
 	}
 }
 
@@ -166,19 +147,8 @@ void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart)
 {
 	if(huart == &huart1)
 	{
-		//Formacion mensaje saliente
-		tx_ptr = (uint8_t*) &px_cur; //Posicion x (actual)
-		for (int i = 0; i < 4; i++) tx_buf[i] = *(tx_ptr + i);
-		tx_ptr = (uint8_t*) &py_cur; //Posicion y (actual)
-		for (int i = 0; i < 4; i++) tx_buf[i + 4] = *(tx_ptr + i);
-		tx_ptr = (uint8_t*) &v_cur; //Velocidad x (actual)
-		for (int i = 0; i < 4; i++) tx_buf[i + 8] = *(tx_ptr + i);
-		tx_ptr = (uint8_t*) &w_cur; //Rotacion z (actual)
-		for (int i = 0; i < 4; i++) tx_buf[i + 12] = *(tx_ptr + i);
-		tx_ptr = (uint8_t*) &cam_cur; //Angulo camara (actual)
-		for (int i = 0; i < 4; i++) tx_buf[i + 16] = *(tx_ptr + i);
-		//Nueva transmision mensaje
-		HAL_UART_Transmit_IT(&huart1, tx_buf, sizeof(tx_buf));
+		//Nueva recepcion mensaje
+		HAL_UART_Receive_IT(&huart1, rx_buf, 3 * sizeof(float));
 	}
 }
 
@@ -226,12 +196,9 @@ int main(void)
   MX_USART1_UART_Init();
   /* USER CODE BEGIN 2 */
 
-  //Primera recepcion UART
-  HAL_UART_Receive_IT(&huart1, rx_buf, sizeof(rx_buf));
+  //Inicio comunicacion UART
+  HAL_UART_Transmit_IT(&huart1, tx_buf, 5 * sizeof(float));
 
-  //Primera transmision UART
-  for (int i = 0; i < sizeof(tx_buf); i++) tx_buf[i] = 0x00;
-  HAL_UART_Transmit_IT(&huart1, tx_buf, sizeof(tx_buf));
 
   //Inicio salidas control PWM
   __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, 1500); //Punto neutro ESC para iniciarla
@@ -248,9 +215,6 @@ int main(void)
 
   //Inicio conversion ADC por DMA
   HAL_ADC_Start_DMA(&hadc1, adc_buf, 2);
-	  w_cur = 6.9;
-	  px_cur = 1.2;
-	  py_cur = 2.3;
 
   /* USER CODE END 2 */
 
@@ -262,6 +226,17 @@ int main(void)
   	  	  if (duty < 6) HAL_GPIO_WritePin(PIN_MODO, 0); //Boton A - Modo automatico
   	  	  	  //Valores intermedios: boton sin pulsar, el modo de funcionamiento se mantiene
   	  	  if (duty > 8) HAL_GPIO_WritePin(PIN_MODO, 1); //Boton B - Modo manual
+
+  	  //Comprension UART entrante
+  	  	  v_in = rx_buf[0];
+  	  	  w_in = rx_buf[1];
+  	  	  cam_in = rx_buf[2];
+  	  //Formacion UART saliente
+  	  	  tx_buf[0] = px_cur;
+  	  	  tx_buf[1] = py_cur;
+  	  	  tx_buf[2] = v_cur;
+  	  	  tx_buf[3] = w_cur;
+  	  	  tx_buf[4] = cam_cur;
 
   	  //Accion control sobre ESC: v_in -> motor -> d -> set_compare
   		  motor = v_in * REDUCCION * 60 / (2 * PI * RADIO); //Velocidad deseada motor (rpm)

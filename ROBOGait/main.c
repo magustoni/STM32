@@ -31,18 +31,11 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
-
 //Constantes fisicas
 #define PI 3.14159265359
 #define FRECUENCIA 16000000 //Frecuencia reloj interno (Hz)
 #define REDUCCION 30 //Reducion en la transmision
 #define RADIO 0.1 //Radio ruedas (m)
-
-//Pines E/S
-#define PIN_MODO GPIOC, GPIO_PIN_13 //Pin seleccion modo y LED azul (encendido a nivel bajo)
-										//0 -> automatico, LED ON | 1 -> manual, LED OFF
-
-
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -58,97 +51,60 @@ I2C_HandleTypeDef hi2c1;
 
 TIM_HandleTypeDef htim1;
 TIM_HandleTypeDef htim2;
+TIM_HandleTypeDef htim3;
 TIM_HandleTypeDef htim5;
+TIM_HandleTypeDef htim10;
 
 UART_HandleTypeDef huart1;
 
 /* USER CODE BEGIN PV */
+ float rc_count, duty;
 
-//Variables fisicas actuales
-float px_cur, py_cur; //Valores actuales de x,y (m)
-						//odometria -> x,y
-float v_cur, w_cur; //Valores actuales de v y w (m/s)
-						//cuenta temp -> giro motor -> v_cur
-float dir_cur; //Orientacion actual de la direcicon (º respecto al centro en sentido horario)
-						//realimentacion -> ADC -> º
-float cam_cur; //Orientacion actual de la camara (º respecto al centro en sentido horario)
-						//realimentacion -> ADC -> º
-int adc_buf[2]; //Buffer para converison ADC
+ int adc_buf[2];
 
+ int encoder;
 
-//Variables fisicas solicitadas
-float v_in, w_in; //Valores solicitados de v y w (m/s)
-float cam_in; //Orientacion solicitada de la camara
-
-//Variables salida del control
-float motor, d_motor; //Control ESC
-float d_direccion; //Control servo
-float d_camara; //Control camara
-
-//Variables para medir encoder
-float v_count; //Contador auxiliar para temporizador
-float frequency; //Frecuencia pulsos = vueltas/seg
-
-//Variables para entrada receptor
-float rc_count; //Contador auxiliar para temporizador
-float duty; //Ciclo trabajo PWM (5% - 10%)
-
-//Buffers para transmision UART
-float tx_buf[5], rx_buf[3];
-		//Mensaje de salida: rx_cur, ry_cur, v_cur, w_cur, cam_cur
-		//Mensaje de entrada: v_in, w_in, cam_in
-
-
+ int aux;
+ float vx;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
 void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
+static void MX_TIM3_Init(void);
+static void MX_TIM10_Init(void);
+static void MX_I2C1_Init(void);
+static void MX_USART1_UART_Init(void);
+static void MX_DMA_Init(void);
 static void MX_TIM2_Init(void);
 static void MX_ADC1_Init(void);
 static void MX_TIM1_Init(void);
 static void MX_TIM5_Init(void);
-static void MX_DMA_Init(void);
-static void MX_I2C1_Init(void);
-static void MX_USART1_UART_Init(void);
 /* USER CODE BEGIN PFP */
 
 void HAL_TIM_IC_CaptureCallback(TIM_HandleTypeDef *htim)
 {
-	//Velocidad encoder
-	if (htim->Instance == TIM2)
-	{
-		v_count = HAL_TIM_ReadCapturedValue(htim, TIM_CHANNEL_1);
+	//Medicion pulsos encoder
+	if(htim->Instance == TIM2)
+		encoder = __HAL_TIM_GET_COUNTER(htim);
 
-		if(v_count != 0)
-			frequency = FRECUENCIA / v_count;
+	//Medida velocidad - PA0
+	if(htim->Instance == TIM5)
+	{
+		aux = 0;
+
+		if(HAL_TIM_ReadCapturedValue(htim, TIM_CHANNEL_1) != 0)
+			vx = FRECUENCIA / HAL_TIM_ReadCapturedValue(htim, TIM_CHANNEL_1);
 		__HAL_TIM_SET_COUNTER(htim, 0);
 	}
 
-	//PWM receptor
-	if (htim->Instance == TIM5 && htim->Channel == 1)
+	//Receptor radio
+	if (htim->Instance == TIM3 && htim->Channel == 1)
 	{
 		rc_count = HAL_TIM_ReadCapturedValue(htim, TIM_CHANNEL_1);
 
 		if (rc_count != 0)
 			duty = HAL_TIM_ReadCapturedValue(htim, TIM_CHANNEL_2) * 100 / rc_count;
-	}
-}
-void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
-{
-	if(huart == &huart1)
-	{
-		//Nueva transmision mensaje
-  	  	HAL_UART_Transmit_IT(&huart1, tx_buf, 5 * sizeof(float));
-	}
-}
-
-void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart)
-{
-	if(huart == &huart1)
-	{
-		//Nueva recepcion mensaje
-		HAL_UART_Receive_IT(&huart1, rx_buf, 3 * sizeof(float));
 	}
 }
 
@@ -187,89 +143,36 @@ int main(void)
 
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
+  MX_TIM3_Init();
+  MX_TIM10_Init();
+  MX_I2C1_Init();
+  MX_USART1_UART_Init();
+  MX_DMA_Init();
   MX_TIM2_Init();
   MX_ADC1_Init();
   MX_TIM1_Init();
   MX_TIM5_Init();
-  MX_DMA_Init();
-  MX_I2C1_Init();
-  MX_USART1_UART_Init();
   /* USER CODE BEGIN 2 */
 
-  //Inicio comunicacion UART
-  HAL_UART_Transmit_IT(&huart1, tx_buf, 5 * sizeof(float));
+  HAL_TIM_PWM_Start_IT(&htim1, TIM_CHANNEL_2); //THR - PA9
+  HAL_TIM_PWM_Start_IT(&htim1, TIM_CHANNEL_3); //STR - PA10
+  HAL_TIM_PWM_Start_IT(&htim10, TIM_CHANNEL_1); //CAM - PB8
 
+  HAL_TIM_IC_Start_IT(&htim3, TIM_CHANNEL_1); //Canal directo radio - PA6
+  HAL_TIM_IC_Start(&htim3, TIM_CHANNEL_2); //Canal indirecto radio
 
-  //Inicio salidas control PWM
-  __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, 1500); //Punto neutro ESC para iniciarla
-  HAL_TIM_PWM_Start_IT(&htim1, TIM_CHANNEL_1); //Control ESC
-  HAL_TIM_PWM_Start_IT(&htim1, TIM_CHANNEL_2); //Control servo direccion
-  HAL_TIM_PWM_Start_IT(&htim1, TIM_CHANNEL_3); //Control servo camara
+  HAL_TIM_IC_Start_IT(&htim5, TIM_CHANNEL_1); //Velocidad - PA0
+  HAL_TIM_Encoder_Start_IT(&htim2, TIM_CHANNEL_ALL); //Encoder - PA5+PB3
 
-  HAL_Delay(2000); //Esperar al arranque de la ESC
-
-  //Inicio medicion senales
-  HAL_TIM_IC_Start_IT(&htim2, TIM_CHANNEL_1); //Medicion encoder
-  HAL_TIM_IC_Start_IT(&htim5, TIM_CHANNEL_1); //Canal directo radio
-  HAL_TIM_IC_Start(&htim5, TIM_CHANNEL_2); //Canal indirecto radio
-
-  //Inicio conversion ADC por DMA
-  HAL_ADC_Start_DMA(&hadc1, adc_buf, 2);
+  HAL_ADC_Start_DMA(&hadc1, adc_buf, 2); //Realimentacion servos - PA1 y PA2
 
   /* USER CODE END 2 */
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
   while (1)
-    {
-  	  //Seleccion modo
-  	  	  if (duty < 6) HAL_GPIO_WritePin(PIN_MODO, 0); //Boton A - Modo automatico
-  	  	  	  //Valores intermedios: boton sin pulsar, el modo de funcionamiento se mantiene
-  	  	  if (duty > 8) HAL_GPIO_WritePin(PIN_MODO, 1); //Boton B - Modo manual
-
-  	  //Comprension UART entrante
-  	  	  v_in = rx_buf[0];
-  	  	  w_in = rx_buf[1];
-  	  	  cam_in = rx_buf[2];
-  	  //Formacion UART saliente
-  	  	  tx_buf[0] = px_cur;
-  	  	  tx_buf[1] = py_cur;
-  	  	  tx_buf[2] = v_cur;
-  	  	  tx_buf[3] = w_cur;
-  	  	  tx_buf[4] = cam_cur;
-
-  	  //Accion control sobre ESC: v_in -> motor -> d -> set_compare
-  		  motor = v_in * REDUCCION * 60 / (2 * PI * RADIO); //Velocidad deseada motor (rpm)
-  		  	  if (motor > 0) d_motor = motor / 385419 + 1.519; //Rango directo
-  		  	  else d_motor = motor / 354415 + 1.477; //Rango inverso
-  		  __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, 1000 * d_motor); //Salida del control
-
-  	  //Accion control sobre servo----------------------------------------------------------------------------------TO DO
-  		  //w_in -> modelo cinematico -> angulo ruedas -> angulo servo -> d -> set_compare
-  		  d_direccion = w_in;
-  		  __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_2, 1000 * d_direccion); //Salida del control
-
-  	  //Accion control sobre camara---------------------------------------------------------------------------------TO DO
-  		  //cam_in -> filtro medias -> control -> d -> set_compare
-  		  d_camara = cam_in;
-  		  __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_3, 1000 * d_camara); //Salida del control
-
-  	  //Medicion angulo direccion-----------------------------------------------------------------------------------TO DO
-  	  	  //potenciometro -> ADC -> proporcion -> angulo servo -> angulo ruedas -> calibracion?
-  		  dir_cur = adc_buf[0];
-
-  	  //Medicion angulo camara--------------------------------------------------------------------------------------TO DO
-    	  //potenciometro -> ADC -> proporcion -> angulo camara
-  		  cam_cur = adc_buf[1];
-
-  	  //Comunicacion MPU9250----------------------------------------------------------------------------------------TO DO
-  	  	  //
-
-  	  //Odometria---------------------------------------------------------------------------------------------------TO DO
-  	  	  //
-  		  v_cur = frequency * 2 * PI * RADIO / REDUCCION;
-
-
+  {
+	  if(aux++ > 200000) vx = 0;
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
@@ -359,7 +262,7 @@ static void MX_ADC1_Init(void)
   */
   sConfig.Channel = ADC_CHANNEL_1;
   sConfig.Rank = 1;
-  sConfig.SamplingTime = ADC_SAMPLETIME_15CYCLES;
+  sConfig.SamplingTime = ADC_SAMPLETIME_480CYCLES;
   if (HAL_ADC_ConfigChannel(&hadc1, &sConfig) != HAL_OK)
   {
     Error_Handler();
@@ -460,22 +363,16 @@ static void MX_TIM1_Init(void)
     Error_Handler();
   }
   sConfigOC.OCMode = TIM_OCMODE_PWM1;
-  sConfigOC.Pulse = 1480;
+  sConfigOC.Pulse = 0;
   sConfigOC.OCPolarity = TIM_OCPOLARITY_HIGH;
   sConfigOC.OCNPolarity = TIM_OCNPOLARITY_HIGH;
   sConfigOC.OCFastMode = TIM_OCFAST_DISABLE;
   sConfigOC.OCIdleState = TIM_OCIDLESTATE_RESET;
   sConfigOC.OCNIdleState = TIM_OCNIDLESTATE_RESET;
-  if (HAL_TIM_PWM_ConfigChannel(&htim1, &sConfigOC, TIM_CHANNEL_1) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  sConfigOC.Pulse = 5000;
   if (HAL_TIM_PWM_ConfigChannel(&htim1, &sConfigOC, TIM_CHANNEL_2) != HAL_OK)
   {
     Error_Handler();
   }
-  sConfigOC.Pulse = 10000;
   if (HAL_TIM_PWM_ConfigChannel(&htim1, &sConfigOC, TIM_CHANNEL_3) != HAL_OK)
   {
     Error_Handler();
@@ -510,9 +407,8 @@ static void MX_TIM2_Init(void)
 
   /* USER CODE END TIM2_Init 0 */
 
-  TIM_ClockConfigTypeDef sClockSourceConfig = {0};
+  TIM_Encoder_InitTypeDef sConfig = {0};
   TIM_MasterConfigTypeDef sMasterConfig = {0};
-  TIM_IC_InitTypeDef sConfigIC = {0};
 
   /* USER CODE BEGIN TIM2_Init 1 */
 
@@ -523,16 +419,16 @@ static void MX_TIM2_Init(void)
   htim2.Init.Period = 4294967295;
   htim2.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
   htim2.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
-  if (HAL_TIM_Base_Init(&htim2) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  sClockSourceConfig.ClockSource = TIM_CLOCKSOURCE_INTERNAL;
-  if (HAL_TIM_ConfigClockSource(&htim2, &sClockSourceConfig) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  if (HAL_TIM_IC_Init(&htim2) != HAL_OK)
+  sConfig.EncoderMode = TIM_ENCODERMODE_TI1;
+  sConfig.IC1Polarity = TIM_ICPOLARITY_RISING;
+  sConfig.IC1Selection = TIM_ICSELECTION_DIRECTTI;
+  sConfig.IC1Prescaler = TIM_ICPSC_DIV1;
+  sConfig.IC1Filter = 0;
+  sConfig.IC2Polarity = TIM_ICPOLARITY_RISING;
+  sConfig.IC2Selection = TIM_ICSELECTION_DIRECTTI;
+  sConfig.IC2Prescaler = TIM_ICPSC_DIV1;
+  sConfig.IC2Filter = 0;
+  if (HAL_TIM_Encoder_Init(&htim2, &sConfig) != HAL_OK)
   {
     Error_Handler();
   }
@@ -542,17 +438,73 @@ static void MX_TIM2_Init(void)
   {
     Error_Handler();
   }
+  /* USER CODE BEGIN TIM2_Init 2 */
+
+  /* USER CODE END TIM2_Init 2 */
+
+}
+
+/**
+  * @brief TIM3 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_TIM3_Init(void)
+{
+
+  /* USER CODE BEGIN TIM3_Init 0 */
+
+  /* USER CODE END TIM3_Init 0 */
+
+  TIM_SlaveConfigTypeDef sSlaveConfig = {0};
+  TIM_IC_InitTypeDef sConfigIC = {0};
+  TIM_MasterConfigTypeDef sMasterConfig = {0};
+
+  /* USER CODE BEGIN TIM3_Init 1 */
+
+  /* USER CODE END TIM3_Init 1 */
+  htim3.Instance = TIM3;
+  htim3.Init.Prescaler = 9;
+  htim3.Init.CounterMode = TIM_COUNTERMODE_UP;
+  htim3.Init.Period = 65535;
+  htim3.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
+  htim3.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
+  if (HAL_TIM_IC_Init(&htim3) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sSlaveConfig.SlaveMode = TIM_SLAVEMODE_RESET;
+  sSlaveConfig.InputTrigger = TIM_TS_TI1FP1;
+  sSlaveConfig.TriggerPolarity = TIM_INPUTCHANNELPOLARITY_RISING;
+  sSlaveConfig.TriggerPrescaler = TIM_ICPSC_DIV1;
+  sSlaveConfig.TriggerFilter = 0;
+  if (HAL_TIM_SlaveConfigSynchro(&htim3, &sSlaveConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
   sConfigIC.ICPolarity = TIM_INPUTCHANNELPOLARITY_RISING;
   sConfigIC.ICSelection = TIM_ICSELECTION_DIRECTTI;
   sConfigIC.ICPrescaler = TIM_ICPSC_DIV1;
   sConfigIC.ICFilter = 0;
-  if (HAL_TIM_IC_ConfigChannel(&htim2, &sConfigIC, TIM_CHANNEL_1) != HAL_OK)
+  if (HAL_TIM_IC_ConfigChannel(&htim3, &sConfigIC, TIM_CHANNEL_1) != HAL_OK)
   {
     Error_Handler();
   }
-  /* USER CODE BEGIN TIM2_Init 2 */
+  sConfigIC.ICPolarity = TIM_INPUTCHANNELPOLARITY_FALLING;
+  sConfigIC.ICSelection = TIM_ICSELECTION_INDIRECTTI;
+  if (HAL_TIM_IC_ConfigChannel(&htim3, &sConfigIC, TIM_CHANNEL_2) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sMasterConfig.MasterOutputTrigger = TIM_TRGO_RESET;
+  sMasterConfig.MasterSlaveMode = TIM_MASTERSLAVEMODE_DISABLE;
+  if (HAL_TIMEx_MasterConfigSynchronization(&htim3, &sMasterConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN TIM3_Init 2 */
 
-  /* USER CODE END TIM2_Init 2 */
+  /* USER CODE END TIM3_Init 2 */
 
 }
 
@@ -568,9 +520,9 @@ static void MX_TIM5_Init(void)
 
   /* USER CODE END TIM5_Init 0 */
 
-  TIM_SlaveConfigTypeDef sSlaveConfig = {0};
-  TIM_IC_InitTypeDef sConfigIC = {0};
+  TIM_ClockConfigTypeDef sClockSourceConfig = {0};
   TIM_MasterConfigTypeDef sMasterConfig = {0};
+  TIM_IC_InitTypeDef sConfigIC = {0};
 
   /* USER CODE BEGIN TIM5_Init 1 */
 
@@ -581,16 +533,22 @@ static void MX_TIM5_Init(void)
   htim5.Init.Period = 4294967295;
   htim5.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
   htim5.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
+  if (HAL_TIM_Base_Init(&htim5) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sClockSourceConfig.ClockSource = TIM_CLOCKSOURCE_INTERNAL;
+  if (HAL_TIM_ConfigClockSource(&htim5, &sClockSourceConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
   if (HAL_TIM_IC_Init(&htim5) != HAL_OK)
   {
     Error_Handler();
   }
-  sSlaveConfig.SlaveMode = TIM_SLAVEMODE_RESET;
-  sSlaveConfig.InputTrigger = TIM_TS_TI1FP1;
-  sSlaveConfig.TriggerPolarity = TIM_INPUTCHANNELPOLARITY_RISING;
-  sSlaveConfig.TriggerPrescaler = TIM_ICPSC_DIV1;
-  sSlaveConfig.TriggerFilter = 0;
-  if (HAL_TIM_SlaveConfigSynchro(&htim5, &sSlaveConfig) != HAL_OK)
+  sMasterConfig.MasterOutputTrigger = TIM_TRGO_RESET;
+  sMasterConfig.MasterSlaveMode = TIM_MASTERSLAVEMODE_DISABLE;
+  if (HAL_TIMEx_MasterConfigSynchronization(&htim5, &sMasterConfig) != HAL_OK)
   {
     Error_Handler();
   }
@@ -602,21 +560,55 @@ static void MX_TIM5_Init(void)
   {
     Error_Handler();
   }
-  sConfigIC.ICPolarity = TIM_INPUTCHANNELPOLARITY_FALLING;
-  sConfigIC.ICSelection = TIM_ICSELECTION_INDIRECTTI;
-  if (HAL_TIM_IC_ConfigChannel(&htim5, &sConfigIC, TIM_CHANNEL_2) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  sMasterConfig.MasterOutputTrigger = TIM_TRGO_RESET;
-  sMasterConfig.MasterSlaveMode = TIM_MASTERSLAVEMODE_DISABLE;
-  if (HAL_TIMEx_MasterConfigSynchronization(&htim5, &sMasterConfig) != HAL_OK)
-  {
-    Error_Handler();
-  }
   /* USER CODE BEGIN TIM5_Init 2 */
 
   /* USER CODE END TIM5_Init 2 */
+
+}
+
+/**
+  * @brief TIM10 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_TIM10_Init(void)
+{
+
+  /* USER CODE BEGIN TIM10_Init 0 */
+
+  /* USER CODE END TIM10_Init 0 */
+
+  TIM_OC_InitTypeDef sConfigOC = {0};
+
+  /* USER CODE BEGIN TIM10_Init 1 */
+
+  /* USER CODE END TIM10_Init 1 */
+  htim10.Instance = TIM10;
+  htim10.Init.Prescaler = 15;
+  htim10.Init.CounterMode = TIM_COUNTERMODE_UP;
+  htim10.Init.Period = 20000;
+  htim10.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
+  htim10.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
+  if (HAL_TIM_Base_Init(&htim10) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  if (HAL_TIM_PWM_Init(&htim10) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sConfigOC.OCMode = TIM_OCMODE_PWM1;
+  sConfigOC.Pulse = 1500;
+  sConfigOC.OCPolarity = TIM_OCPOLARITY_HIGH;
+  sConfigOC.OCFastMode = TIM_OCFAST_DISABLE;
+  if (HAL_TIM_PWM_ConfigChannel(&htim10, &sConfigOC, TIM_CHANNEL_1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN TIM10_Init 2 */
+
+  /* USER CODE END TIM10_Init 2 */
+  HAL_TIM_MspPostInit(&htim10);
 
 }
 

@@ -31,11 +31,17 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
+
 //Constantes fisicas
 #define PI 3.14159265359
 #define FRECUENCIA 16000000 //Frecuencia reloj interno (Hz)
 #define REDUCCION 30 //Reducion en la transmision
 #define RADIO 0.1 //Radio ruedas (m)
+
+//Pines E/S
+#define PIN_MODO GPIOC, GPIO_PIN_13 //Pin seleccion modo y LED azul (encendido a nivel bajo)
+										//0 -> automatico, LED ON | 1 -> manual, LED OFF
+
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -58,14 +64,39 @@ TIM_HandleTypeDef htim10;
 UART_HandleTypeDef huart1;
 
 /* USER CODE BEGIN PV */
- float rc_count, duty;
 
- int adc_buf[2];
+ //Variables fisicas actuales
+ float px_cur, py_cur; //Valores actuales de x,y (m)
+ 						//odometria -> x,y
+ float v_cur, w_cur; //Valores actuales de v y w (m/s)
+ int aux = 0;			//cuenta temp -> giro motor -> v_cur
 
- int encoder;
+ float dir_cur; //Orientacion actual de la direcicon (º respecto al centro en sentido horario)
+ 						//realimentacion -> ADC -> º
+ float cam_cur; //Orientacion actual de la camara (º respecto al centro en sentido horario)
+ 						//realimentacion -> ADC -> º
+ int adc_buf[2]; //Buffer para conversion ADC
 
- int aux;
- float vx;
+
+ //Variables fisicas solicitadas
+ float v_in, w_in; //Valores solicitados de v y w (m/s)
+ float cam_in; //Orientacion solicitada de la camara
+
+ //Variables salida del control
+ float motor, d_motor; //Control ESC
+ float d_direccion; //Control servo
+ float d_camara; //Control camara
+
+ //Variables para entrada receptor
+ float rc_count; //Contador auxiliar para temporizador
+ float duty; //Ciclo trabajo PWM (5% - 10%)
+
+ //Buffers para transmision UART
+ float tx_buf[5], rx_buf[3];
+ 		//Mensaje de salida: px_cur, py_cur, v_cur, w_cur, cam_cur
+ 		//Mensaje de entrada: v_in, w_in, cam_in
+
+
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -86,7 +117,7 @@ void HAL_TIM_IC_CaptureCallback(TIM_HandleTypeDef *htim)
 {
 	//Medicion pulsos encoder
 	if(htim->Instance == TIM2)
-		encoder = __HAL_TIM_GET_COUNTER(htim);
+		px_cur = __HAL_TIM_GET_COUNTER(htim) * 2 * PI * RADIO / 4 / REDUCCION;
 
 	//Medida velocidad - PA0
 	if(htim->Instance == TIM5)
@@ -94,7 +125,7 @@ void HAL_TIM_IC_CaptureCallback(TIM_HandleTypeDef *htim)
 		aux = 0;
 
 		if(HAL_TIM_ReadCapturedValue(htim, TIM_CHANNEL_1) != 0)
-			vx = FRECUENCIA / HAL_TIM_ReadCapturedValue(htim, TIM_CHANNEL_1);
+			v_cur = FRECUENCIA / HAL_TIM_ReadCapturedValue(htim, TIM_CHANNEL_1) * 2 * PI * RADIO / 4 / REDUCCION;
 		__HAL_TIM_SET_COUNTER(htim, 0);
 	}
 
@@ -102,9 +133,26 @@ void HAL_TIM_IC_CaptureCallback(TIM_HandleTypeDef *htim)
 	if (htim->Instance == TIM3 && htim->Channel == 1)
 	{
 		rc_count = HAL_TIM_ReadCapturedValue(htim, TIM_CHANNEL_1);
-
 		if (rc_count != 0)
 			duty = HAL_TIM_ReadCapturedValue(htim, TIM_CHANNEL_2) * 100 / rc_count;
+	}
+}
+
+void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
+{
+	if(huart == &huart1)
+	{
+		//Nueva transmision mensaje
+  	  	HAL_UART_Transmit_IT(&huart1, tx_buf, 5 * sizeof(float));
+	}
+}
+
+void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart)
+{
+	if(huart == &huart1)
+	{
+		//Nueva recepcion mensaje
+		HAL_UART_Receive_IT(&huart1, rx_buf, 3 * sizeof(float));
 	}
 }
 
@@ -154,16 +202,23 @@ int main(void)
   MX_TIM5_Init();
   /* USER CODE BEGIN 2 */
 
+  //Inicio comunicacion UART
+  HAL_UART_Transmit_IT(&huart1, tx_buf, 5 * sizeof(float));
+
+  HAL_Delay(2000); //Esperar al arranque de la ESC
+
+  //Inicio salidas control PWM
   HAL_TIM_PWM_Start_IT(&htim1, TIM_CHANNEL_2); //THR - PA9
   HAL_TIM_PWM_Start_IT(&htim1, TIM_CHANNEL_3); //STR - PA10
   HAL_TIM_PWM_Start_IT(&htim10, TIM_CHANNEL_1); //CAM - PB8
 
+  //Inicio medicion senales
   HAL_TIM_IC_Start_IT(&htim3, TIM_CHANNEL_1); //Canal directo radio - PA6
   HAL_TIM_IC_Start(&htim3, TIM_CHANNEL_2); //Canal indirecto radio
-
   HAL_TIM_IC_Start_IT(&htim5, TIM_CHANNEL_1); //Velocidad - PA0
   HAL_TIM_Encoder_Start_IT(&htim2, TIM_CHANNEL_ALL); //Encoder - PA5+PB3
 
+  //Inicio conversion ADC por DMA
   HAL_ADC_Start_DMA(&hadc1, adc_buf, 2); //Realimentacion servos - PA1 y PA2
 
   /* USER CODE END 2 */
@@ -172,7 +227,55 @@ int main(void)
   /* USER CODE BEGIN WHILE */
   while (1)
   {
-	  if(aux++ > 200000) vx = 0;
+	  if(aux++ > 5000) v_cur = 0;
+
+  	  //Seleccion modo
+  	  	  if (duty < 6) HAL_GPIO_WritePin(PIN_MODO, 0); //Boton A - Modo automatico
+  	  	  	  //Valores intermedios: boton sin pulsar, el modo de funcionamiento se mantiene
+  	  	  if (duty > 8) HAL_GPIO_WritePin(PIN_MODO, 1); //Boton B - Modo manual
+
+  	  //Comprension UART entrante
+  	  	  v_in = rx_buf[0];
+  	  	  w_in = rx_buf[1];
+  	  	  cam_in = rx_buf[2];
+  	  //Formacion UART saliente
+  	  	  tx_buf[0] = px_cur;
+  	  	  tx_buf[1] = py_cur;
+  	  	  tx_buf[2] = v_cur;
+  	  	  tx_buf[3] = w_cur;
+  	  	  tx_buf[4] = cam_cur;
+
+  	  //Accion control sobre ESC: v_in -> motor -> d -> set_compare
+  		  motor = v_in * REDUCCION * 60 / (2 * PI * RADIO); //Velocidad deseada motor (rpm)
+  		  	  if (motor > 0) d_motor = motor / 385419 + 1.519; //Rango directo
+  		  	  else d_motor = motor / 354415 + 1.477; //Rango inverso
+  		  __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_2, 1000 * d_motor); //Salida del control
+
+  	  //Accion control sobre servo----------------------------------------------------------------------------------TO DO
+  		  //w_in -> modelo cinematico -> angulo ruedas -> angulo servo -> d -> set_compare
+  		  d_direccion = w_in;
+  		  __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_3, 1000 * d_direccion); //Salida del control
+
+  	  //Accion control sobre camara---------------------------------------------------------------------------------TO DO
+  		  //cam_in -> filtro medias -> control -> d -> set_compare
+  		  d_camara = cam_in;
+  		  __HAL_TIM_SET_COMPARE(&htim10, TIM_CHANNEL_1, 1000 * d_camara); //Salida del control
+
+  	  //Medicion angulo direccion-----------------------------------------------------------------------------------TO DO
+  	  	  //potenciometro -> ADC -> proporcion -> angulo servo -> angulo ruedas -> calibracion?
+  		  dir_cur = adc_buf[0];
+
+  	  //Medicion angulo camara--------------------------------------------------------------------------------------TO DO
+    	  //potenciometro -> ADC -> proporcion -> angulo camara
+  		  cam_cur = adc_buf[1];
+
+  	  //Comunicacion MPU9250----------------------------------------------------------------------------------------TO DO
+  	  	  //
+
+  	  //Odometria---------------------------------------------------------------------------------------------------TO DO
+  	  	  //
+
+
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */

@@ -18,6 +18,7 @@
 /* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
+#include "usb_device.h"
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
@@ -61,14 +62,13 @@ TIM_HandleTypeDef htim3;
 TIM_HandleTypeDef htim5;
 TIM_HandleTypeDef htim10;
 
-UART_HandleTypeDef huart1;
-
 /* USER CODE BEGIN PV */
 
  //Variables fisicas actuales
  float px_cur, py_cur; //Valores actuales de x,y (m)
  						//odometria -> x,y
  float v_cur, w_cur; //Valores actuales de v y w (m/s)
+ float px_aux;
  int aux = 0;			//cuenta temp -> giro motor -> v_cur
 
  float dir_cur; //Orientacion actual de la direcicon (º respecto al centro en sentido horario)
@@ -105,13 +105,14 @@ static void MX_GPIO_Init(void);
 static void MX_TIM3_Init(void);
 static void MX_TIM10_Init(void);
 static void MX_I2C1_Init(void);
-static void MX_USART1_UART_Init(void);
 static void MX_DMA_Init(void);
 static void MX_TIM2_Init(void);
 static void MX_ADC1_Init(void);
 static void MX_TIM1_Init(void);
 static void MX_TIM5_Init(void);
 /* USER CODE BEGIN PFP */
+
+extern uint8_t CDC_Transmit_FS(uint8_t* Buf, uint16_t Len);
 
 void HAL_TIM_IC_CaptureCallback(TIM_HandleTypeDef *htim)
 {
@@ -122,11 +123,17 @@ void HAL_TIM_IC_CaptureCallback(TIM_HandleTypeDef *htim)
 	//Medida velocidad - PA0
 	if(htim->Instance == TIM5)
 	{
-		aux = 0;
-
+		//Modulo
 		if(HAL_TIM_ReadCapturedValue(htim, TIM_CHANNEL_1) != 0)
 			v_cur = FRECUENCIA / HAL_TIM_ReadCapturedValue(htim, TIM_CHANNEL_1) * 2 * PI * RADIO / 4 / REDUCCION;
+		//Signo
+		if(px_aux > px_cur)
+			v_cur = -v_cur;
+		//Preparar para siguiente interrupcion
 		__HAL_TIM_SET_COUNTER(htim, 0);
+		px_aux = px_cur;
+		//Reiniciar watchdog
+		aux = 0;
 	}
 
 	//Receptor radio
@@ -135,24 +142,6 @@ void HAL_TIM_IC_CaptureCallback(TIM_HandleTypeDef *htim)
 		rc_count = HAL_TIM_ReadCapturedValue(htim, TIM_CHANNEL_1);
 		if (rc_count != 0)
 			duty = HAL_TIM_ReadCapturedValue(htim, TIM_CHANNEL_2) * 100 / rc_count;
-	}
-}
-
-void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
-{
-	if(huart == &huart1)
-	{
-		//Nueva transmision mensaje
-  	  	HAL_UART_Transmit_IT(&huart1, tx_buf, 5 * sizeof(float));
-	}
-}
-
-void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart)
-{
-	if(huart == &huart1)
-	{
-		//Nueva recepcion mensaje
-		HAL_UART_Receive_IT(&huart1, rx_buf, 3 * sizeof(float));
 	}
 }
 
@@ -194,18 +183,16 @@ int main(void)
   MX_TIM3_Init();
   MX_TIM10_Init();
   MX_I2C1_Init();
-  MX_USART1_UART_Init();
   MX_DMA_Init();
   MX_TIM2_Init();
   MX_ADC1_Init();
   MX_TIM1_Init();
   MX_TIM5_Init();
+  MX_USB_DEVICE_Init();
   /* USER CODE BEGIN 2 */
 
-  //Inicio comunicacion UART
-  HAL_UART_Transmit_IT(&huart1, tx_buf, 5 * sizeof(float));
-
-  HAL_Delay(2000); //Esperar al arranque de la ESC
+  //Esperar al arranque de la ESC
+  HAL_Delay(2000);
 
   //Inicio salidas control PWM
   HAL_TIM_PWM_Start_IT(&htim1, TIM_CHANNEL_2); //THR - PA9
@@ -234,16 +221,6 @@ int main(void)
   	  	  	  //Valores intermedios: boton sin pulsar, el modo de funcionamiento se mantiene
   	  	  if (duty > 8) HAL_GPIO_WritePin(PIN_MODO, 1); //Boton B - Modo manual
 
-  	  //Comprension UART entrante
-  	  	  v_in = rx_buf[0];
-  	  	  w_in = rx_buf[1];
-  	  	  cam_in = rx_buf[2];
-  	  //Formacion UART saliente
-  	  	  tx_buf[0] = px_cur;
-  	  	  tx_buf[1] = py_cur;
-  	  	  tx_buf[2] = v_cur;
-  	  	  tx_buf[3] = w_cur;
-  	  	  tx_buf[4] = cam_cur;
 
   	  //Accion control sobre ESC: v_in -> motor -> d -> set_compare
   		  motor = v_in * REDUCCION * 60 / (2 * PI * RADIO); //Velocidad deseada motor (rpm)
@@ -275,6 +252,13 @@ int main(void)
   	  //Odometria---------------------------------------------------------------------------------------------------TO DO
   	  	  //
 
+  	  //Transmision puerto COM
+  		  tx_buf[0] = px_cur;
+  		  tx_buf[1] = py_cur;
+  		  tx_buf[2] = v_cur;
+  		  tx_buf[3] = w_cur;
+  		  tx_buf[4] = cam_cur;
+  		  CDC_Transmit_FS(tx_buf, sizeof(tx_buf));
 
     /* USER CODE END WHILE */
 
@@ -300,10 +284,14 @@ void SystemClock_Config(void)
   /** Initializes the RCC Oscillators according to the specified parameters
   * in the RCC_OscInitTypeDef structure.
   */
-  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSI;
-  RCC_OscInitStruct.HSIState = RCC_HSI_ON;
-  RCC_OscInitStruct.HSICalibrationValue = RCC_HSICALIBRATION_DEFAULT;
-  RCC_OscInitStruct.PLL.PLLState = RCC_PLL_NONE;
+  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSE;
+  RCC_OscInitStruct.HSEState = RCC_HSE_ON;
+  RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
+  RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSE;
+  RCC_OscInitStruct.PLL.PLLM = 25;
+  RCC_OscInitStruct.PLL.PLLN = 192;
+  RCC_OscInitStruct.PLL.PLLP = RCC_PLLP_DIV2;
+  RCC_OscInitStruct.PLL.PLLQ = 4;
   if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK)
   {
     Error_Handler();
@@ -313,12 +301,12 @@ void SystemClock_Config(void)
   */
   RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK|RCC_CLOCKTYPE_SYSCLK
                               |RCC_CLOCKTYPE_PCLK1|RCC_CLOCKTYPE_PCLK2;
-  RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_HSI;
+  RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_PLLCLK;
   RCC_ClkInitStruct.AHBCLKDivider = RCC_SYSCLK_DIV1;
-  RCC_ClkInitStruct.APB1CLKDivider = RCC_HCLK_DIV1;
+  RCC_ClkInitStruct.APB1CLKDivider = RCC_HCLK_DIV2;
   RCC_ClkInitStruct.APB2CLKDivider = RCC_HCLK_DIV1;
 
-  if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_0) != HAL_OK)
+  if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_3) != HAL_OK)
   {
     Error_Handler();
   }
@@ -345,7 +333,7 @@ static void MX_ADC1_Init(void)
   /** Configure the global features of the ADC (Clock, Resolution, Data Alignment and number of conversion)
   */
   hadc1.Instance = ADC1;
-  hadc1.Init.ClockPrescaler = ADC_CLOCK_SYNC_PCLK_DIV2;
+  hadc1.Init.ClockPrescaler = ADC_CLOCK_SYNC_PCLK_DIV4;
   hadc1.Init.Resolution = ADC_RESOLUTION_12B;
   hadc1.Init.ScanConvMode = ENABLE;
   hadc1.Init.ContinuousConvMode = ENABLE;
@@ -716,39 +704,6 @@ static void MX_TIM10_Init(void)
 }
 
 /**
-  * @brief USART1 Initialization Function
-  * @param None
-  * @retval None
-  */
-static void MX_USART1_UART_Init(void)
-{
-
-  /* USER CODE BEGIN USART1_Init 0 */
-
-  /* USER CODE END USART1_Init 0 */
-
-  /* USER CODE BEGIN USART1_Init 1 */
-
-  /* USER CODE END USART1_Init 1 */
-  huart1.Instance = USART1;
-  huart1.Init.BaudRate = 9600;
-  huart1.Init.WordLength = UART_WORDLENGTH_8B;
-  huart1.Init.StopBits = UART_STOPBITS_1;
-  huart1.Init.Parity = UART_PARITY_NONE;
-  huart1.Init.Mode = UART_MODE_TX_RX;
-  huart1.Init.HwFlowCtl = UART_HWCONTROL_NONE;
-  huart1.Init.OverSampling = UART_OVERSAMPLING_16;
-  if (HAL_UART_Init(&huart1) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  /* USER CODE BEGIN USART1_Init 2 */
-
-  /* USER CODE END USART1_Init 2 */
-
-}
-
-/**
   * Enable DMA controller clock
   */
 static void MX_DMA_Init(void)
@@ -775,6 +730,7 @@ static void MX_GPIO_Init(void)
 
   /* GPIO Ports Clock Enable */
   __HAL_RCC_GPIOC_CLK_ENABLE();
+  __HAL_RCC_GPIOH_CLK_ENABLE();
   __HAL_RCC_GPIOA_CLK_ENABLE();
   __HAL_RCC_GPIOB_CLK_ENABLE();
 

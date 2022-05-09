@@ -35,8 +35,8 @@
 
 //Constantes fisicas
 #define PI 3.14159265359
-#define FRECUENCIA 16000000 //Frecuencia reloj interno (Hz)
-#define REDUCCION 30 //Reducion en la transmision
+#define FRECUENCIA 96000000 //Frecuencia reloj interno (Hz)
+#define REDUCCION 30.5 //Reducion en la transmision
 #define RADIO 0.1 //Radio ruedas (m)
 
 //Pines E/S
@@ -96,7 +96,6 @@ TIM_HandleTypeDef htim10;
  		//Mensaje de salida: px_cur, py_cur, v_cur, w_cur, cam_cur
  		//Mensaje de entrada: v_in, w_in, cam_in
 
-
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -118,7 +117,8 @@ void HAL_TIM_IC_CaptureCallback(TIM_HandleTypeDef *htim)
 {
 	//Medicion pulsos encoder
 	if(htim->Instance == TIM2)
-		px_cur = __HAL_TIM_GET_COUNTER(htim) * 2 * PI * RADIO / 4 / REDUCCION;
+		px_cur = (int16_t)__HAL_TIM_GET_COUNTER(htim) * 2 * PI * RADIO / 4 / REDUCCION;
+
 
 	//Medida velocidad - PA0
 	if(htim->Instance == TIM5)
@@ -135,6 +135,7 @@ void HAL_TIM_IC_CaptureCallback(TIM_HandleTypeDef *htim)
 		//Reiniciar watchdog
 		aux = 0;
 	}
+
 
 	//Receptor radio
 	if (htim->Instance == TIM3 && htim->Channel == 1)
@@ -208,13 +209,14 @@ int main(void)
   //Inicio conversion ADC por DMA
   HAL_ADC_Start_DMA(&hadc1, adc_buf, 2); //Realimentacion servos - PA1 y PA2
 
+
   /* USER CODE END 2 */
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
   while (1)
   {
-	  if(aux++ > 5000) v_cur = 0;
+	  if(aux++ > 100000) v_cur = 0;
 
   	  //Seleccion modo
   	  	  if (duty < 6) HAL_GPIO_WritePin(PIN_MODO, 0); //Boton A - Modo automatico
@@ -547,6 +549,7 @@ static void MX_TIM3_Init(void)
 
   /* USER CODE END TIM3_Init 0 */
 
+  TIM_ClockConfigTypeDef sClockSourceConfig = {0};
   TIM_SlaveConfigTypeDef sSlaveConfig = {0};
   TIM_IC_InitTypeDef sConfigIC = {0};
   TIM_MasterConfigTypeDef sMasterConfig = {0};
@@ -555,11 +558,20 @@ static void MX_TIM3_Init(void)
 
   /* USER CODE END TIM3_Init 1 */
   htim3.Instance = TIM3;
-  htim3.Init.Prescaler = 9;
+  htim3.Init.Prescaler = 100;
   htim3.Init.CounterMode = TIM_COUNTERMODE_UP;
   htim3.Init.Period = 65535;
   htim3.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
   htim3.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
+  if (HAL_TIM_Base_Init(&htim3) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sClockSourceConfig.ClockSource = TIM_CLOCKSOURCE_INTERNAL;
+  if (HAL_TIM_ConfigClockSource(&htim3, &sClockSourceConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
   if (HAL_TIM_IC_Init(&htim3) != HAL_OK)
   {
     Error_Handler();
